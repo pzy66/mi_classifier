@@ -83,10 +83,12 @@ def _build_synthetic_capture(run_cfg: SimulatedRun) -> tuple[np.ndarray, list[di
     rng = np.random.default_rng(run_cfg.seed)
     sequence = _class_order(run_cfg.trials_per_class)
 
-    baseline = 80
-    cue = 40
-    imagery = 220
-    iti = 40
+    # Keep synthetic timing close to collection defaults so default training windows
+    # (2.0/2.5/3.0s with offset search) remain valid.
+    baseline = 500   # 2.0s @ 250Hz
+    cue = 250        # 1.0s @ 250Hz
+    imagery = 1000   # 4.0s @ 250Hz
+    iti = 625        # 2.5s @ 250Hz
     gap = 16
 
     cursor = 8
@@ -161,10 +163,10 @@ def _save_one_run(*, session_id: str, run_cfg: SimulatedRun) -> dict:
         channel_names=["C3", "Cz", "C4", "PO3", "PO4", "O1", "Oz", "O2"],
         channel_positions=[0, 1, 2, 3, 4, 5, 6, 7],
         trials_per_class=int(run_cfg.trials_per_class),
-        baseline_sec=1.0,
-        cue_sec=0.5,
-        imagery_sec=2.0,
-        iti_sec=0.5,
+        baseline_sec=2.0,
+        cue_sec=1.0,
+        imagery_sec=4.0,
+        iti_sec=2.5,
         random_seed=42,
         save_epochs_npz=True,
         operator="e2e-check",
@@ -219,6 +221,9 @@ def run_e2e_check() -> dict:
     test_window_volt = (first_epoch.X_uV[0] * 1e-6).astype(np.float32)
     pred = predictor.analyze_window(test_window_volt, live_sampling_rate=float(first_epoch.sampling_rate))
 
+    metrics = dict(summary.get("metrics") or {})
+    pipeline_tag = str(summary.get("artifact_type") or summary.get("selected_pipeline") or "unknown")
+
     result = {
         "status": "pass",
         "paths": {
@@ -244,11 +249,11 @@ def run_e2e_check() -> dict:
             "first_npz_sampling_rate": float(loaded_preview[0].sampling_rate) if loaded_preview else None,
         },
         "training": {
-            "selected_pipeline": str(summary["selected_pipeline"]),
+            "pipeline_tag": pipeline_tag,
             "total_trials_used": int(summary["total_trials"]),
             "source_records_count": int(len(summary["source_records"])),
-            "test_acc": float(summary["metrics"]["test_acc"]),
-            "kappa": float(summary["metrics"]["kappa"]),
+            "test_acc": float(metrics.get("bank_test_acc", metrics.get("test_acc", 0.0))),
+            "kappa": float(metrics.get("bank_kappa", metrics.get("kappa", 0.0))),
         },
         "realtime": {
             "expected_channels": int(predictor.expected_channel_count),
@@ -269,7 +274,7 @@ def main() -> int:
     result = run_e2e_check()
     print("E2E check status:", result["status"])
     print("Summary path:", SUMMARY_PATH)
-    print("Training selected pipeline:", result["training"]["selected_pipeline"])
+    print("Training pipeline tag:", result["training"]["pipeline_tag"])
     print("Realtime prediction:", result["realtime"]["prediction_display_name"])
     return 0
 

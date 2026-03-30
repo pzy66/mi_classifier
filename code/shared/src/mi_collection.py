@@ -584,17 +584,52 @@ def _write_csv(path: Path, rows: list[dict[str, object]], fieldnames: list[str])
             writer.writerow(row)
 
 
+def _normalize_manifest_row(raw_row: dict[str, object]) -> dict[str, object]:
+    """Normalize legacy/new manifest rows into the current schema."""
+    row = {field: raw_row.get(field, "") for field in COLLECTION_MANIFEST_FIELDS}
+    if not row.get("artifact_epochs_npz"):
+        row["artifact_epochs_npz"] = raw_row.get("artifact_npz", "")
+    if not row.get("epochs_npz"):
+        row["epochs_npz"] = raw_row.get("legacy_epochs_npz", "")
+    return row
+
+
+def _ensure_manifest_schema(manifest_path: Path) -> None:
+    """Rewrite manifest in-place when the header schema does not match current fields."""
+    if not manifest_path.exists():
+        return
+
+    with manifest_path.open("r", encoding="utf-8-sig", newline="") as file:
+        reader = csv.DictReader(file)
+        existing_fields = list(reader.fieldnames or [])
+        if existing_fields == COLLECTION_MANIFEST_FIELDS:
+            return
+        existing_rows = [dict(row) for row in reader]
+
+    backup_path = manifest_path.with_name(
+        f"{manifest_path.stem}_legacy_schema_{datetime.now().strftime('%Y%m%d_%H%M%S')}{manifest_path.suffix}"
+    )
+    manifest_path.replace(backup_path)
+
+    with manifest_path.open("w", encoding="utf-8-sig", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=COLLECTION_MANIFEST_FIELDS)
+        writer.writeheader()
+        for row in existing_rows:
+            writer.writerow(_normalize_manifest_row(row))
+
+
 def _append_collection_manifest(output_root: str | Path, record: dict[str, object]) -> Path:
     """Append one run-level row to dataset manifest CSV for easier training traceability."""
     root = Path(output_root)
     root.mkdir(parents=True, exist_ok=True)
     manifest_path = root / COLLECTION_MANIFEST_NAME
+    _ensure_manifest_schema(manifest_path)
     write_header = not manifest_path.exists()
     with manifest_path.open("a", encoding="utf-8-sig", newline="") as file:
         writer = csv.DictWriter(file, fieldnames=COLLECTION_MANIFEST_FIELDS)
         if write_header:
             writer.writeheader()
-        writer.writerow({field: record.get(field, "") for field in COLLECTION_MANIFEST_FIELDS})
+        writer.writerow(_normalize_manifest_row(record))
     return manifest_path
 
 

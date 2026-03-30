@@ -117,6 +117,12 @@ pip install -r requirements-deep.txt
 
 即：`2.0 + 1.0 + 4.0 + 2.5 = 9.5s / trial`
 
+关键约束（很重要）：
+
+- 训练默认配置要求：`imagery_sec >= max(window_secs) + max(window_offset_secs)`  
+  默认即 `imagery_sec >= 3.75s`（`3.0 + 0.75`）
+- 因此采集端建议把 `imagery_sec` 保持在 `4.0s` 或更高；如果你把 imagery 改短，训练时必须同步下调 `--window-secs` / `--window-offset-secs`
+
 #### run 结构
 
 - `trials_per_class = 10`
@@ -204,6 +210,10 @@ datasets/custom_mi/
 
 - `collection_manifest.csv`：全局采集清单
 
+说明：
+
+- 若检测到旧版 manifest 表头（如 `artifact_npz`、`imagery_style` 等），程序会先自动迁移到新字段并保留一个 `*_legacy_schema_*.csv` 备份，再继续追加新记录。
+
 ### 5.3 四类数据如何落盘
 
 #### 1) 主分类数据（`*_mi_epochs.npz`）
@@ -252,12 +262,22 @@ datasets/custom_mi/
 
 - `*_epochs.npz` / `epochs.npz`
 
+目录层级兼容：
+
+- 新结构：`sub-<id>/ses-<id>/...`
+- 旧结构：`ses-<id>/...`
+- 训练会同时识别两种结构。
+
 ### 6.2 数据分流与任务
 
 - 主模型（4 类）：用 `mi` 数据
 - gate（二分类）：`X_gate_pos` vs `X_gate_neg + X_gate_hard_neg`
 - bad-window（二分类）：`X_artifact` vs clean negatives
 - continuous：仅做仿实时评估
+
+补充：
+
+- `X_gate_hard_neg` 可以为空（例如本次没标坏试次/伪迹段不足），训练流程会自动兼容。
 
 ### 6.3 切分策略（防泄漏）
 
@@ -473,6 +493,15 @@ python run_03_realtime_infer.py
 
 - 检查 `*_continuous.npz` 是否存在
 - 检查 prompt 标注数量是否为 0
+
+### 10.5 训练报错 `Requested windows ... exceed available ... imagery epoch`
+
+含义：采集得到的 imagery 有效长度不足以覆盖训练窗口+offset。
+
+- 默认训练约束是 `imagery_sec >= 3.75s`
+- 解决办法二选一：
+  1. 重新采集时把 `imagery_sec` 提高（建议 `>=4.0s`）
+  2. 训练时下调 `--window-secs` 和/或 `--window-offset-secs`
 
 ---
 

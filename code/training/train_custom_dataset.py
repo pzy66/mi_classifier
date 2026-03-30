@@ -2543,8 +2543,39 @@ def train_custom_model(
     gate_neg_sources_all = np.asarray(gate_loaded.get("neg_sources", []), dtype=object)
     gate_hard_neg_sources_all = np.asarray(gate_loaded.get("hard_neg_sources", []), dtype=object)
 
+    gate_nonempty_arrays = [
+        np.asarray(array, dtype=np.float32)
+        for array in (X_gate_pos_all, X_gate_neg_all, X_gate_hard_neg_all)
+        if np.asarray(array).ndim == 3 and np.asarray(array).shape[0] > 0 and np.asarray(array).shape[2] > 0
+    ]
+    if gate_nonempty_arrays:
+        gate_target_samples = int(min(array.shape[2] for array in gate_nonempty_arrays))
+    else:
+        gate_target_samples = int(gate_loaded.get("target_epoch_samples", 0) or 0)
+
+    def _normalize_gate_array(array: np.ndarray) -> np.ndarray:
+        array = np.asarray(array, dtype=np.float32)
+        if array.ndim != 3:
+            return np.empty((0, X_raw.shape[1], gate_target_samples), dtype=np.float32)
+        if array.shape[1] != X_raw.shape[1]:
+            raise ValueError(
+                "Gate dataset channel mismatch: "
+                f"expected {X_raw.shape[1]}, got {array.shape[1]}."
+            )
+        if gate_target_samples <= 0 or array.shape[0] == 0:
+            return np.empty((0, X_raw.shape[1], gate_target_samples), dtype=np.float32)
+        return np.asarray(array[:, :, :gate_target_samples], dtype=np.float32)
+
+    X_gate_pos_all = _normalize_gate_array(X_gate_pos_all)
+    X_gate_neg_all = _normalize_gate_array(X_gate_neg_all)
+    X_gate_hard_neg_all = _normalize_gate_array(X_gate_hard_neg_all)
+
     gate_available = bool(
-        X_gate_pos_all.shape[0] > 0
+        gate_target_samples > 0
+        and X_gate_pos_all.shape[2] == gate_target_samples
+        and X_gate_neg_all.shape[2] == gate_target_samples
+        and X_gate_hard_neg_all.shape[2] == gate_target_samples
+        and X_gate_pos_all.shape[0] > 0
         and (X_gate_neg_all.shape[0] + X_gate_hard_neg_all.shape[0]) > 0
     )
     gate_split_strategy = "unavailable"
