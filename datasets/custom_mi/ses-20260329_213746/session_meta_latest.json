@@ -1,0 +1,131 @@
+{
+  "saved_at": "2026-03-29T21:46:58",
+  "session": {
+    "subject_id": "001",
+    "session_id": "20260329_213746",
+    "output_root": "D:\\DC01\\mi_classifier_portable_20260329\\datasets\\custom_mi",
+    "board_id": 0,
+    "serial_port": "COM3",
+    "channel_names": [
+      "C3",
+      "Cz",
+      "C4",
+      "PO3",
+      "PO4",
+      "O1",
+      "Oz",
+      "O2"
+    ],
+    "channel_positions": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ],
+    "trials_per_class": 10,
+    "baseline_sec": 4.0,
+    "cue_sec": 1.5,
+    "imagery_sec": 4.0,
+    "iti_sec": 2.0,
+    "random_seed": 42,
+    "save_epochs_npz": true,
+    "operator": "",
+    "notes": "",
+    "board_name": "Cyton (0)"
+  },
+  "sampling_rate_hz": 250.0,
+  "selected_eeg_rows": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8
+  ],
+  "marker_row": 23,
+  "timestamp_row": 22,
+  "sample_count": 117141,
+  "duration_sec": 468.564,
+  "brainflow_eeg_unit": "microvolt",
+  "saved_fif_unit": "volt",
+  "epochs_unit": "volt",
+  "quality_report": {
+    "overall_std_uV": 4255.658203125,
+    "overall_peak_to_peak_uV": 16397.93359375,
+    "channels": [
+      {
+        "channel_name": "C3",
+        "std_uV": 1052.6058349609375,
+        "peak_to_peak_uV": 3880.6171875,
+        "rms_uV": 69942.0859375
+      },
+      {
+        "channel_name": "Cz",
+        "std_uV": 878.7797241210938,
+        "peak_to_peak_uV": 3371.671875,
+        "rms_uV": 71742.53125
+      },
+      {
+        "channel_name": "C4",
+        "std_uV": 876.8564453125,
+        "peak_to_peak_uV": 3336.9375,
+        "rms_uV": 74841.6484375
+      },
+      {
+        "channel_name": "PO3",
+        "std_uV": 1130.37451171875,
+        "peak_to_peak_uV": 4053.890625,
+        "rms_uV": 71577.2890625
+      },
+      {
+        "channel_name": "PO4",
+        "std_uV": 582.0816650390625,
+        "peak_to_peak_uV": 2318.34375,
+        "rms_uV": 69037.0390625
+      },
+      {
+        "channel_name": "O1",
+        "std_uV": 446.950439453125,
+        "peak_to_peak_uV": 1612.7734375,
+        "rms_uV": 72099.3359375
+      },
+      {
+        "channel_name": "Oz",
+        "std_uV": 521.4063110351562,
+        "peak_to_peak_uV": 1883.96484375,
+        "rms_uV": 66222.40625
+      },
+      {
+        "channel_name": "O2",
+        "std_uV": 134.96852111816406,
+        "peak_to_peak_uV": 679.8046875,
+        "rms_uV": 81241.828125
+      }
+    ]
+  },
+  "event_count": 322,
+  "run_index": 1,
+  "run_stem": "sub-001_ses-20260329_213746_run-001_tpc-10_n-040_ok-040",
+  "trial_count": 40,
+  "accepted_trial_count": 40,
+  "rejected_trial_count": 0,
+  "epochs_saved": 40,
+  "session_start_wall_time": "2026-03-29T21:39:09.621",
+  "session_end_wall_time": "2026-03-29T21:46:58.134",
+  "first_board_timestamp": 1774791552.0,
+  "last_board_timestamp": 1774792064.0,
+  "files": {
+    "session_raw_fif": "D:\\DC01\\mi_classifier_portable_20260329\\datasets\\custom_mi\\sub-001\\ses-20260329_213746\\sub-001_ses-20260329_213746_run-001_tpc-10_n-040_ok-040_raw.fif",
+    "events_csv": "D:\\DC01\\mi_classifier_portable_20260329\\datasets\\custom_mi\\sub-001\\ses-20260329_213746\\sub-001_ses-20260329_213746_run-001_tpc-10_n-040_ok-040_events.csv",
+    "trials_csv": "D:\\DC01\\mi_classifier_portable_20260329\\datasets\\custom_mi\\sub-001\\ses-20260329_213746\\sub-001_ses-20260329_213746_run-001_tpc-10_n-040_ok-040_trials.csv",
+    "session_meta_json": "D:\\DC01\\mi_classifier_portable_20260329\\datasets\\custom_mi\\sub-001\\ses-20260329_213746\\sub-001_ses-20260329_213746_run-001_tpc-10_n-040_ok-040_session_meta.json",
+    "quality_report_json": "D:\\DC01\\mi_classifier_portable_20260329\\datasets\\custom_mi\\sub-001\\ses-20260329_213746\\sub-001_ses-20260329_213746_run-001_tpc-10_n-040_ok-040_quality_report.json",
+    "epochs_npz": "D:\\DC01\\mi_classifier_portable_20260329\\datasets\\custom_mi\\sub-001\\ses-20260329_213746\\sub-001_ses-20260329_213746_run-001_tpc-10_n-040_ok-040_epochs.npz"
+  }
+}

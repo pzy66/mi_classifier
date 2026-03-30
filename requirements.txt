@@ -1,0 +1,11 @@
+# Core runtime dependencies
+numpy
+scipy
+mne
+scikit-learn
+moabb
+pyriemann
+matplotlib
+seaborn
+pyyaml
+tqdm

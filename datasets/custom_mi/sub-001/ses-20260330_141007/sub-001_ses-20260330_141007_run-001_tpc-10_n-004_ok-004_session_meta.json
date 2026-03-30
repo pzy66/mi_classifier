@@ -1,0 +1,175 @@
+{
+  "saved_at": "2026-03-30T14:11:58",
+  "session": {
+    "subject_id": "001",
+    "session_id": "20260330_141007",
+    "output_root": "C:\\Users\\P1233\\Desktop\\brain\\mi_classifier\\datasets\\custom_mi",
+    "board_id": 0,
+    "serial_port": "COM4",
+    "channel_names": [
+      "C3",
+      "Cz",
+      "C4",
+      "PO3",
+      "PO4",
+      "O1",
+      "Oz",
+      "O2"
+    ],
+    "channel_positions": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ],
+    "trials_per_class": 10,
+    "baseline_sec": 4.0,
+    "cue_sec": 1.5,
+    "imagery_sec": 5.0,
+    "iti_sec": 4.0,
+    "random_seed": 42,
+    "enable_idle_block": true,
+    "idle_block_count": 2,
+    "idle_block_duration_sec": 90.0,
+    "enable_artifact_block": true,
+    "artifact_types": [
+      "blink",
+      "eye_move",
+      "swallow",
+      "jaw_clench",
+      "head_move"
+    ],
+    "artifact_duration_sec": 15.0,
+    "enable_continuous_block": true,
+    "continuous_block_count": 1,
+    "continuous_block_duration_sec": 180.0,
+    "continuous_prompt_interval_sec": 4.0,
+    "imagery_style": "kinesthetic",
+    "paradigm_version": "mi_v2_central_prior",
+    "practice_repetitions": 3,
+    "save_epochs_npz": true,
+    "operator": "",
+    "notes": "",
+    "board_name": "Cyton (0)"
+  },
+  "sampling_rate_hz": 250.0,
+  "selected_eeg_rows": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8
+  ],
+  "marker_row": 23,
+  "timestamp_row": 22,
+  "sample_count": 16826,
+  "duration_sec": 67.304,
+  "brainflow_eeg_unit": "microvolt",
+  "saved_fif_unit": "volt",
+  "epochs_unit": "volt",
+  "quality_report": {
+    "overall_std_uV": 120619.8203125,
+    "overall_peak_to_peak_uV": 372176.78125,
+    "channels": [
+      {
+        "channel_name": "C3",
+        "std_uV": 7316.7099609375,
+        "peak_to_peak_uV": 171077.078125,
+        "rms_uV": 115007.796875
+      },
+      {
+        "channel_name": "Cz",
+        "std_uV": 6630.1005859375,
+        "peak_to_peak_uV": 174876.453125,
+        "rms_uV": 115449.5859375
+      },
+      {
+        "channel_name": "C4",
+        "std_uV": 6631.81884765625,
+        "peak_to_peak_uV": 174995.140625,
+        "rms_uV": 115457.3046875
+      },
+      {
+        "channel_name": "PO3",
+        "std_uV": 10441.8173828125,
+        "peak_to_peak_uV": 240418.40625,
+        "rms_uV": 139726.78125
+      },
+      {
+        "channel_name": "PO4",
+        "std_uV": 10443.6640625,
+        "peak_to_peak_uV": 240540.75,
+        "rms_uV": 139750.34375
+      },
+      {
+        "channel_name": "O1",
+        "std_uV": 16581.234375,
+        "peak_to_peak_uV": 366392.34375,
+        "rms_uV": 107812.6015625
+      },
+      {
+        "channel_name": "Oz",
+        "std_uV": 8765.28515625,
+        "peak_to_peak_uV": 186908.265625,
+        "rms_uV": 138333.296875
+      },
+      {
+        "channel_name": "O2",
+        "std_uV": 7687.232421875,
+        "peak_to_peak_uV": 159560.015625,
+        "rms_uV": 138574.75
+      }
+    ]
+  },
+  "event_count": 32,
+  "run_index": 1,
+  "run_stem": "sub-001_ses-20260330_141007_run-001_tpc-10_n-004_ok-004",
+  "trial_count": 4,
+  "accepted_trial_count": 4,
+  "rejected_trial_count": 0,
+  "epochs_saved": 3,
+  "baseline_rest_saved": 3,
+  "iti_rest_saved": 2,
+  "idle_block_saved": 0,
+  "artifact_segment_saved": 0,
+  "continuous_block_saved": 0,
+  "continuous_prompt_saved": 0,
+  "gate_pos_saved": 3,
+  "gate_neg_saved": 5,
+  "gate_hard_neg_saved": 0,
+  "imagery_style": "kinesthetic",
+  "paradigm_version": "mi_v2_central_prior",
+  "practice_protocol": {
+    "imagery_style": "kinesthetic",
+    "practice_repetitions": 3,
+    "practice_classes": [
+      "left_hand",
+      "right_hand",
+      "feet",
+      "tongue"
+    ]
+  },
+  "session_start_wall_time": "2026-03-30T14:10:47.313",
+  "session_end_wall_time": "2026-03-30T14:11:56.623",
+  "first_board_timestamp": 1774851072.0,
+  "last_board_timestamp": 1774851072.0,
+  "files": {
+    "session_raw_fif": "C:\\Users\\P1233\\Desktop\\brain\\mi_classifier\\datasets\\custom_mi\\sub-001\\ses-20260330_141007\\sub-001_ses-20260330_141007_run-001_tpc-10_n-004_ok-004_raw.fif",
+    "events_csv": "C:\\Users\\P1233\\Desktop\\brain\\mi_classifier\\datasets\\custom_mi\\sub-001\\ses-20260330_141007\\sub-001_ses-20260330_141007_run-001_tpc-10_n-004_ok-004_events.csv",
+    "trials_csv": "C:\\Users\\P1233\\Desktop\\brain\\mi_classifier\\datasets\\custom_mi\\sub-001\\ses-20260330_141007\\sub-001_ses-20260330_141007_run-001_tpc-10_n-004_ok-004_trials.csv",
+    "session_meta_json": "C:\\Users\\P1233\\Desktop\\brain\\mi_classifier\\datasets\\custom_mi\\sub-001\\ses-20260330_141007\\sub-001_ses-20260330_141007_run-001_tpc-10_n-004_ok-004_session_meta.json",
+    "quality_report_json": "C:\\Users\\P1233\\Desktop\\brain\\mi_classifier\\datasets\\custom_mi\\sub-001\\ses-20260330_141007\\sub-001_ses-20260330_141007_run-001_tpc-10_n-004_ok-004_quality_report.json",
+    "epochs_npz": "C:\\Users\\P1233\\Desktop\\brain\\mi_classifier\\datasets\\custom_mi\\sub-001\\ses-20260330_141007\\sub-001_ses-20260330_141007_run-001_tpc-10_n-004_ok-004_epochs.npz",
+    "mi_epochs_npz": "C:\\Users\\P1233\\Desktop\\brain\\mi_classifier\\datasets\\custom_mi\\sub-001\\ses-20260330_141007\\sub-001_ses-20260330_141007_run-001_tpc-10_n-004_ok-004_mi_epochs.npz",
+    "gate_epochs_npz": "C:\\Users\\P1233\\Desktop\\brain\\mi_classifier\\datasets\\custom_mi\\sub-001\\ses-20260330_141007\\sub-001_ses-20260330_141007_run-001_tpc-10_n-004_ok-004_gate_epochs.npz",
+    "artifact_npz": "C:\\Users\\P1233\\Desktop\\brain\\mi_classifier\\datasets\\custom_mi\\sub-001\\ses-20260330_141007\\sub-001_ses-20260330_141007_run-001_tpc-10_n-004_ok-004_artifact_epochs.npz",
+    "continuous_npz": "C:\\Users\\P1233\\Desktop\\brain\\mi_classifier\\datasets\\custom_mi\\sub-001\\ses-20260330_141007\\sub-001_ses-20260330_141007_run-001_tpc-10_n-004_ok-004_continuous.npz"
+  }
+}

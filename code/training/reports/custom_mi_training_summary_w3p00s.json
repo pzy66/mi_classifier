@@ -1,0 +1,108 @@
+{
+  "window_sec": 3.0,
+  "window_offset_sec": 0.25,
+  "selected_pipeline": "hierarchical+svm",
+  "metrics": {
+    "val_acc": 0.5,
+    "val_kappa": 0.33333333333333337,
+    "val_macro_acc": 0.5,
+    "test_acc": 0.375,
+    "kappa": 0.16666666666666663,
+    "test_macro_acc": 0.375,
+    "per_class_test_acc": {
+      "left_hand": 0.0,
+      "right_hand": 1.0,
+      "feet": 0.0,
+      "tongue": 0.5
+    }
+  },
+  "candidate_scores": [
+    {
+      "name": "hierarchical+lda",
+      "offset_sec": 0.25,
+      "val_acc": 0.375,
+      "val_kappa": 0.16666666666666663,
+      "val_macro_acc": 0.375
+    },
+    {
+      "name": "hierarchical+svm",
+      "offset_sec": 0.25,
+      "val_acc": 0.5,
+      "val_kappa": 0.33333333333333337,
+      "val_macro_acc": 0.5
+    },
+    {
+      "name": "hybrid+lda",
+      "offset_sec": 0.25,
+      "val_acc": 0.125,
+      "val_kappa": -0.16666666666666674,
+      "val_macro_acc": 0.125
+    },
+    {
+      "name": "hybrid+svm",
+      "offset_sec": 0.25,
+      "val_acc": 0.125,
+      "val_kappa": -0.16666666666666674,
+      "val_macro_acc": 0.125
+    },
+    {
+      "name": "hierarchical+lda",
+      "offset_sec": 0.5,
+      "val_acc": 0.375,
+      "val_kappa": 0.16666666666666663,
+      "val_macro_acc": 0.375
+    },
+    {
+      "name": "hierarchical+svm",
+      "offset_sec": 0.5,
+      "val_acc": 0.5,
+      "val_kappa": 0.33333333333333337,
+      "val_macro_acc": 0.5
+    },
+    {
+      "name": "hybrid+lda",
+      "offset_sec": 0.5,
+      "val_acc": 0.125,
+      "val_kappa": -0.16666666666666674,
+      "val_macro_acc": 0.125
+    },
+    {
+      "name": "hybrid+svm",
+      "offset_sec": 0.5,
+      "val_acc": 0.125,
+      "val_kappa": -0.16666666666666674,
+      "val_macro_acc": 0.125
+    },
+    {
+      "name": "hierarchical+lda",
+      "offset_sec": 0.75,
+      "val_acc": 0.125,
+      "val_kappa": -0.16666666666666674,
+      "val_macro_acc": 0.125
+    },
+    {
+      "name": "hierarchical+svm",
+      "offset_sec": 0.75,
+      "val_acc": 0.375,
+      "val_kappa": 0.16666666666666663,
+      "val_macro_acc": 0.375
+    },
+    {
+      "name": "hybrid+lda",
+      "offset_sec": 0.75,
+      "val_acc": 0.125,
+      "val_kappa": -0.16666666666666674,
+      "val_macro_acc": 0.125
+    },
+    {
+      "name": "hybrid+svm",
+      "offset_sec": 0.75,
+      "val_acc": 0.125,
+      "val_kappa": -0.16666666666666674,
+      "val_macro_acc": 0.125
+    }
+  ],
+  "candidate_errors": [],
+  "model_path": "C:\\Users\\P1233\\Desktop\\brain\\mi_classifier\\code\\realtime\\models\\custom_mi_realtime_w3p00s.joblib",
+  "report_path": "C:\\Users\\P1233\\Desktop\\brain\\mi_classifier\\code\\training\\reports\\custom_mi_training_summary_w3p00s.json"
+}

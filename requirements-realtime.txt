@@ -1,0 +1,3 @@
+brainflow
+PyQt5
+pyserial

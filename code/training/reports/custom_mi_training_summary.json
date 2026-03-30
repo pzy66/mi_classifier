@@ -1,0 +1,496 @@
+{
+  "created_at": "2026-03-29T21:30:37",
+  "artifact_type": "multi_window_bank",
+  "dataset_root": "C:\\Users\\P1233\\Desktop\\brain\\mi_classifier\\datasets\\custom_mi",
+  "subject_filter": null,
+  "split_strategy": "trial_stratified_fallback",
+  "fusion_method": "log_weighted_mean",
+  "fusion_weights": [
+    0.15,
+    0.05,
+    0.8
+  ],
+  "window_secs": [
+    2.0,
+    2.5,
+    3.0
+  ],
+  "window_offset_secs": [
+    0.25,
+    0.5,
+    0.75
+  ],
+  "metrics": {
+    "selection_val_acc": 0.625,
+    "selection_val_kappa": 0.5,
+    "selection_val_macro_acc": 0.625,
+    "bank_test_acc": 0.375,
+    "bank_kappa": 0.16666666666666663,
+    "bank_test_macro_acc": 0.375,
+    "bank_per_class_test_acc": {
+      "left_hand": 0.0,
+      "right_hand": 1.0,
+      "feet": 0.5,
+      "tongue": 0.0
+    },
+    "fusion_selection": {
+      "strategy": "validation_grid_search",
+      "candidate_count": 231,
+      "grid_step": 0.05,
+      "metrics": {
+        "acc": 0.625,
+        "kappa": 0.5,
+        "macro_acc": 0.625,
+        "per_class_acc": {
+          "left_hand": 0.0,
+          "right_hand": 1.0,
+          "feet": 1.0,
+          "tongue": 0.5
+        }
+      }
+    },
+    "members": [
+      {
+        "window_sec": 2.0,
+        "window_offset_sec": 0.25,
+        "selected_pipeline": "hierarchical+svm",
+        "metrics": {
+          "val_acc": 0.5,
+          "val_kappa": 0.33333333333333337,
+          "val_macro_acc": 0.5,
+          "test_acc": 0.25,
+          "kappa": 0.0,
+          "test_macro_acc": 0.25,
+          "per_class_test_acc": {
+            "left_hand": 0.0,
+            "right_hand": 0.5,
+            "feet": 0.5,
+            "tongue": 0.0
+          }
+        }
+      },
+      {
+        "window_sec": 2.5,
+        "window_offset_sec": 0.5,
+        "selected_pipeline": "hybrid+svm",
+        "metrics": {
+          "val_acc": 0.375,
+          "val_kappa": 0.16666666666666663,
+          "val_macro_acc": 0.375,
+          "test_acc": 0.25,
+          "kappa": 0.0,
+          "test_macro_acc": 0.25,
+          "per_class_test_acc": {
+            "left_hand": 0.5,
+            "right_hand": 0.5,
+            "feet": 0.0,
+            "tongue": 0.0
+          }
+        }
+      },
+      {
+        "window_sec": 3.0,
+        "window_offset_sec": 0.25,
+        "selected_pipeline": "hierarchical+svm",
+        "metrics": {
+          "val_acc": 0.5,
+          "val_kappa": 0.33333333333333337,
+          "val_macro_acc": 0.5,
+          "test_acc": 0.375,
+          "kappa": 0.16666666666666663,
+          "test_macro_acc": 0.375,
+          "per_class_test_acc": {
+            "left_hand": 0.0,
+            "right_hand": 1.0,
+            "feet": 0.0,
+            "tongue": 0.5
+          }
+        }
+      }
+    ]
+  },
+  "class_names": [
+    "left_hand",
+    "right_hand",
+    "feet",
+    "tongue"
+  ],
+  "display_class_names": [
+    "左手想象",
+    "右手想象",
+    "双脚想象",
+    "舌头想象"
+  ],
+  "channel_names": [
+    "C3",
+    "Cz",
+    "C4",
+    "PO3",
+    "PO4",
+    "O1",
+    "Oz",
+    "O2"
+  ],
+  "sampling_rate": 250.0,
+  "full_window_sec": 3.984,
+  "reference_epoch_samples": 996,
+  "target_epoch_samples": 996,
+  "dropped_short_runs": [],
+  "total_trials": 40,
+  "train_trials": 24,
+  "val_trials": 8,
+  "test_trials": 8,
+  "label_distribution": {
+    "left_hand": 10,
+    "right_hand": 10,
+    "feet": 10,
+    "tongue": 10
+  },
+  "source_sessions": [
+    "sub-001_ses-20260329_203752_run-001_tpc-10_n-040_ok-040_epochs.npz"
+  ],
+  "source_records": [
+    {
+      "file": "sub-001_ses-20260329_203752_run-001_tpc-10_n-040_ok-040_epochs.npz",
+      "subject_id": "001",
+      "session_id": "20260329_203752",
+      "run_index": 1,
+      "run_stem": "sub-001_ses-20260329_203752_run-001_tpc-10_n-040_ok-040",
+      "trials_per_class": 10,
+      "total_trials_in_file": 40,
+      "accepted_trials_in_file": 40,
+      "rejected_trials_in_file": 0,
+      "total_trials_tag": 40,
+      "accepted_trials_tag": 40,
+      "sampling_rate_hz": 250.0,
+      "dropped_reason": ""
+    }
+  ],
+  "model_path": "C:\\Users\\P1233\\Desktop\\brain\\mi_classifier\\code\\realtime\\models\\custom_mi_realtime.joblib",
+  "member_models": [
+    {
+      "window_sec": 2.0,
+      "window_offset_sec": 0.25,
+      "selected_pipeline": "hierarchical+svm",
+      "metrics": {
+        "val_acc": 0.5,
+        "val_kappa": 0.33333333333333337,
+        "val_macro_acc": 0.5,
+        "test_acc": 0.25,
+        "kappa": 0.0,
+        "test_macro_acc": 0.25,
+        "per_class_test_acc": {
+          "left_hand": 0.0,
+          "right_hand": 0.5,
+          "feet": 0.5,
+          "tongue": 0.0
+        }
+      },
+      "candidate_scores": [
+        {
+          "name": "hierarchical+lda",
+          "offset_sec": 0.25,
+          "val_acc": 0.25,
+          "val_kappa": 0.0,
+          "val_macro_acc": 0.25
+        },
+        {
+          "name": "hierarchical+svm",
+          "offset_sec": 0.25,
+          "val_acc": 0.5,
+          "val_kappa": 0.33333333333333337,
+          "val_macro_acc": 0.5
+        },
+        {
+          "name": "hybrid+lda",
+          "offset_sec": 0.25,
+          "val_acc": 0.0,
+          "val_kappa": -0.33333333333333326,
+          "val_macro_acc": 0.0
+        },
+        {
+          "name": "hybrid+svm",
+          "offset_sec": 0.25,
+          "val_acc": 0.25,
+          "val_kappa": 0.0,
+          "val_macro_acc": 0.25
+        },
+        {
+          "name": "hierarchical+lda",
+          "offset_sec": 0.5,
+          "val_acc": 0.125,
+          "val_kappa": -0.16666666666666674,
+          "val_macro_acc": 0.125
+        },
+        {
+          "name": "hierarchical+svm",
+          "offset_sec": 0.5,
+          "val_acc": 0.25,
+          "val_kappa": 0.0,
+          "val_macro_acc": 0.25
+        },
+        {
+          "name": "hybrid+lda",
+          "offset_sec": 0.5,
+          "val_acc": 0.25,
+          "val_kappa": 0.0,
+          "val_macro_acc": 0.25
+        },
+        {
+          "name": "hybrid+svm",
+          "offset_sec": 0.5,
+          "val_acc": 0.25,
+          "val_kappa": 0.0,
+          "val_macro_acc": 0.25
+        },
+        {
+          "name": "hierarchical+lda",
+          "offset_sec": 0.75,
+          "val_acc": 0.25,
+          "val_kappa": 0.0,
+          "val_macro_acc": 0.25
+        },
+        {
+          "name": "hierarchical+svm",
+          "offset_sec": 0.75,
+          "val_acc": 0.375,
+          "val_kappa": 0.16666666666666663,
+          "val_macro_acc": 0.375
+        },
+        {
+          "name": "hybrid+lda",
+          "offset_sec": 0.75,
+          "val_acc": 0.25,
+          "val_kappa": 0.0,
+          "val_macro_acc": 0.25
+        },
+        {
+          "name": "hybrid+svm",
+          "offset_sec": 0.75,
+          "val_acc": 0.25,
+          "val_kappa": 0.0,
+          "val_macro_acc": 0.25
+        }
+      ],
+      "candidate_errors": [],
+      "model_path": "C:\\Users\\P1233\\Desktop\\brain\\mi_classifier\\code\\realtime\\models\\custom_mi_realtime_w2p00s.joblib",
+      "report_path": "C:\\Users\\P1233\\Desktop\\brain\\mi_classifier\\code\\training\\reports\\custom_mi_training_summary_w2p00s.json"
+    },
+    {
+      "window_sec": 2.5,
+      "window_offset_sec": 0.5,
+      "selected_pipeline": "hybrid+svm",
+      "metrics": {
+        "val_acc": 0.375,
+        "val_kappa": 0.16666666666666663,
+        "val_macro_acc": 0.375,
+        "test_acc": 0.25,
+        "kappa": 0.0,
+        "test_macro_acc": 0.25,
+        "per_class_test_acc": {
+          "left_hand": 0.5,
+          "right_hand": 0.5,
+          "feet": 0.0,
+          "tongue": 0.0
+        }
+      },
+      "candidate_scores": [
+        {
+          "name": "hierarchical+lda",
+          "offset_sec": 0.25,
+          "val_acc": 0.25,
+          "val_kappa": 0.0,
+          "val_macro_acc": 0.25
+        },
+        {
+          "name": "hierarchical+svm",
+          "offset_sec": 0.25,
+          "val_acc": 0.125,
+          "val_kappa": -0.16666666666666674,
+          "val_macro_acc": 0.125
+        },
+        {
+          "name": "hybrid+lda",
+          "offset_sec": 0.25,
+          "val_acc": 0.125,
+          "val_kappa": -0.16666666666666674,
+          "val_macro_acc": 0.125
+        },
+        {
+          "name": "hybrid+svm",
+          "offset_sec": 0.25,
+          "val_acc": 0.25,
+          "val_kappa": 0.0,
+          "val_macro_acc": 0.25
+        },
+        {
+          "name": "hierarchical+lda",
+          "offset_sec": 0.5,
+          "val_acc": 0.25,
+          "val_kappa": 0.0,
+          "val_macro_acc": 0.25
+        },
+        {
+          "name": "hierarchical+svm",
+          "offset_sec": 0.5,
+          "val_acc": 0.25,
+          "val_kappa": 0.0,
+          "val_macro_acc": 0.25
+        },
+        {
+          "name": "hybrid+lda",
+          "offset_sec": 0.5,
+          "val_acc": 0.25,
+          "val_kappa": 0.0,
+          "val_macro_acc": 0.25
+        },
+        {
+          "name": "hybrid+svm",
+          "offset_sec": 0.5,
+          "val_acc": 0.375,
+          "val_kappa": 0.16666666666666663,
+          "val_macro_acc": 0.375
+        },
+        {
+          "name": "hierarchical+lda",
+          "offset_sec": 0.75,
+          "val_acc": 0.25,
+          "val_kappa": 0.0,
+          "val_macro_acc": 0.25
+        },
+        {
+          "name": "hierarchical+svm",
+          "offset_sec": 0.75,
+          "val_acc": 0.25,
+          "val_kappa": 0.0,
+          "val_macro_acc": 0.25
+        },
+        {
+          "name": "hybrid+lda",
+          "offset_sec": 0.75,
+          "val_acc": 0.25,
+          "val_kappa": 0.0,
+          "val_macro_acc": 0.25
+        },
+        {
+          "name": "hybrid+svm",
+          "offset_sec": 0.75,
+          "val_acc": 0.25,
+          "val_kappa": 0.0,
+          "val_macro_acc": 0.25
+        }
+      ],
+      "candidate_errors": [],
+      "model_path": "C:\\Users\\P1233\\Desktop\\brain\\mi_classifier\\code\\realtime\\models\\custom_mi_realtime_w2p50s.joblib",
+      "report_path": "C:\\Users\\P1233\\Desktop\\brain\\mi_classifier\\code\\training\\reports\\custom_mi_training_summary_w2p50s.json"
+    },
+    {
+      "window_sec": 3.0,
+      "window_offset_sec": 0.25,
+      "selected_pipeline": "hierarchical+svm",
+      "metrics": {
+        "val_acc": 0.5,
+        "val_kappa": 0.33333333333333337,
+        "val_macro_acc": 0.5,
+        "test_acc": 0.375,
+        "kappa": 0.16666666666666663,
+        "test_macro_acc": 0.375,
+        "per_class_test_acc": {
+          "left_hand": 0.0,
+          "right_hand": 1.0,
+          "feet": 0.0,
+          "tongue": 0.5
+        }
+      },
+      "candidate_scores": [
+        {
+          "name": "hierarchical+lda",
+          "offset_sec": 0.25,
+          "val_acc": 0.375,
+          "val_kappa": 0.16666666666666663,
+          "val_macro_acc": 0.375
+        },
+        {
+          "name": "hierarchical+svm",
+          "offset_sec": 0.25,
+          "val_acc": 0.5,
+          "val_kappa": 0.33333333333333337,
+          "val_macro_acc": 0.5
+        },
+        {
+          "name": "hybrid+lda",
+          "offset_sec": 0.25,
+          "val_acc": 0.125,
+          "val_kappa": -0.16666666666666674,
+          "val_macro_acc": 0.125
+        },
+        {
+          "name": "hybrid+svm",
+          "offset_sec": 0.25,
+          "val_acc": 0.125,
+          "val_kappa": -0.16666666666666674,
+          "val_macro_acc": 0.125
+        },
+        {
+          "name": "hierarchical+lda",
+          "offset_sec": 0.5,
+          "val_acc": 0.375,
+          "val_kappa": 0.16666666666666663,
+          "val_macro_acc": 0.375
+        },
+        {
+          "name": "hierarchical+svm",
+          "offset_sec": 0.5,
+          "val_acc": 0.5,
+          "val_kappa": 0.33333333333333337,
+          "val_macro_acc": 0.5
+        },
+        {
+          "name": "hybrid+lda",
+          "offset_sec": 0.5,
+          "val_acc": 0.125,
+          "val_kappa": -0.16666666666666674,
+          "val_macro_acc": 0.125
+        },
+        {
+          "name": "hybrid+svm",
+          "offset_sec": 0.5,
+          "val_acc": 0.125,
+          "val_kappa": -0.16666666666666674,
+          "val_macro_acc": 0.125
+        },
+        {
+          "name": "hierarchical+lda",
+          "offset_sec": 0.75,
+          "val_acc": 0.125,
+          "val_kappa": -0.16666666666666674,
+          "val_macro_acc": 0.125
+        },
+        {
+          "name": "hierarchical+svm",
+          "offset_sec": 0.75,
+          "val_acc": 0.375,
+          "val_kappa": 0.16666666666666663,
+          "val_macro_acc": 0.375
+        },
+        {
+          "name": "hybrid+lda",
+          "offset_sec": 0.75,
+          "val_acc": 0.125,
+          "val_kappa": -0.16666666666666674,
+          "val_macro_acc": 0.125
+        },
+        {
+          "name": "hybrid+svm",
+          "offset_sec": 0.75,
+          "val_acc": 0.125,
+          "val_kappa": -0.16666666666666674,
+          "val_macro_acc": 0.125
+        }
+      ],
+      "candidate_errors": [],
+      "model_path": "C:\\Users\\P1233\\Desktop\\brain\\mi_classifier\\code\\realtime\\models\\custom_mi_realtime_w3p00s.joblib",
+      "report_path": "C:\\Users\\P1233\\Desktop\\brain\\mi_classifier\\code\\training\\reports\\custom_mi_training_summary_w3p00s.json"
+    }
+  ]
+}

@@ -1,0 +1,131 @@
+{
+  "saved_at": "2026-03-29T21:23:42",
+  "session": {
+    "subject_id": "001",
+    "session_id": "20260329_211547",
+    "output_root": "D:\\DC01\\mi_classifier_portable_20260329\\datasets\\custom_mi",
+    "board_id": 0,
+    "serial_port": "COM3",
+    "channel_names": [
+      "C3",
+      "Cz",
+      "C4",
+      "PO3",
+      "PO4",
+      "O1",
+      "Oz",
+      "O2"
+    ],
+    "channel_positions": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ],
+    "trials_per_class": 5,
+    "baseline_sec": 4.0,
+    "cue_sec": 3.0,
+    "imagery_sec": 6.0,
+    "iti_sec": 1.5,
+    "random_seed": 44,
+    "save_epochs_npz": true,
+    "operator": "",
+    "notes": "",
+    "board_name": "Cyton (0)"
+  },
+  "sampling_rate_hz": 250.0,
+  "selected_eeg_rows": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8
+  ],
+  "marker_row": 23,
+  "timestamp_row": 22,
+  "sample_count": 73311,
+  "duration_sec": 293.244,
+  "brainflow_eeg_unit": "microvolt",
+  "saved_fif_unit": "volt",
+  "epochs_unit": "volt",
+  "quality_report": {
+    "overall_std_uV": 6574.71142578125,
+    "overall_peak_to_peak_uV": 26644.62109375,
+    "channels": [
+      {
+        "channel_name": "C3",
+        "std_uV": 1873.8798828125,
+        "peak_to_peak_uV": 6335.37890625,
+        "rms_uV": 56278.15625
+      },
+      {
+        "channel_name": "Cz",
+        "std_uV": 2128.87109375,
+        "peak_to_peak_uV": 7264.62890625,
+        "rms_uV": 56447.8203125
+      },
+      {
+        "channel_name": "C4",
+        "std_uV": 2051.979248046875,
+        "peak_to_peak_uV": 7006.15234375,
+        "rms_uV": 62132.74609375
+      },
+      {
+        "channel_name": "PO3",
+        "std_uV": 2127.203369140625,
+        "peak_to_peak_uV": 7777.98046875,
+        "rms_uV": 57604.93359375
+      },
+      {
+        "channel_name": "PO4",
+        "std_uV": 1688.9427490234375,
+        "peak_to_peak_uV": 6181.484375,
+        "rms_uV": 58837.828125
+      },
+      {
+        "channel_name": "O1",
+        "std_uV": 1594.8172607421875,
+        "peak_to_peak_uV": 5628.61328125,
+        "rms_uV": 62989.23828125
+      },
+      {
+        "channel_name": "Oz",
+        "std_uV": 1759.53564453125,
+        "peak_to_peak_uV": 6150.44140625,
+        "rms_uV": 57059.48046875
+      },
+      {
+        "channel_name": "O2",
+        "std_uV": 1289.56005859375,
+        "peak_to_peak_uV": 4710.0078125,
+        "rms_uV": 76432.359375
+      }
+    ]
+  },
+  "event_count": 162,
+  "run_index": 1,
+  "run_stem": "sub-001_ses-20260329_211547_run-001_tpc-05_n-020_ok-020",
+  "trial_count": 20,
+  "accepted_trial_count": 20,
+  "rejected_trial_count": 0,
+  "epochs_saved": 20,
+  "session_start_wall_time": "2026-03-29T21:18:49.267",
+  "session_end_wall_time": "2026-03-29T21:23:42.625",
+  "first_board_timestamp": 1774790272.0,
+  "last_board_timestamp": 1774790656.0,
+  "files": {
+    "session_raw_fif": "D:\\DC01\\mi_classifier_portable_20260329\\datasets\\custom_mi\\sub-001\\ses-20260329_211547\\sub-001_ses-20260329_211547_run-001_tpc-05_n-020_ok-020_raw.fif",
+    "events_csv": "D:\\DC01\\mi_classifier_portable_20260329\\datasets\\custom_mi\\sub-001\\ses-20260329_211547\\sub-001_ses-20260329_211547_run-001_tpc-05_n-020_ok-020_events.csv",
+    "trials_csv": "D:\\DC01\\mi_classifier_portable_20260329\\datasets\\custom_mi\\sub-001\\ses-20260329_211547\\sub-001_ses-20260329_211547_run-001_tpc-05_n-020_ok-020_trials.csv",
+    "session_meta_json": "D:\\DC01\\mi_classifier_portable_20260329\\datasets\\custom_mi\\sub-001\\ses-20260329_211547\\sub-001_ses-20260329_211547_run-001_tpc-05_n-020_ok-020_session_meta.json",
+    "quality_report_json": "D:\\DC01\\mi_classifier_portable_20260329\\datasets\\custom_mi\\sub-001\\ses-20260329_211547\\sub-001_ses-20260329_211547_run-001_tpc-05_n-020_ok-020_quality_report.json",
+    "epochs_npz": "D:\\DC01\\mi_classifier_portable_20260329\\datasets\\custom_mi\\sub-001\\ses-20260329_211547\\sub-001_ses-20260329_211547_run-001_tpc-05_n-020_ok-020_epochs.npz"
+  }
+}

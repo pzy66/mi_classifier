@@ -1,0 +1,131 @@
+{
+  "saved_at": "2026-03-29T21:37:44",
+  "session": {
+    "subject_id": "001",
+    "session_id": "20260329_213131",
+    "output_root": "D:\\DC01\\mi_classifier_portable_20260329\\datasets\\custom_mi",
+    "board_id": 0,
+    "serial_port": "COM3",
+    "channel_names": [
+      "C3",
+      "Cz",
+      "C4",
+      "PO3",
+      "PO4",
+      "O1",
+      "Oz",
+      "O2"
+    ],
+    "channel_positions": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ],
+    "trials_per_class": 5,
+    "baseline_sec": 4.0,
+    "cue_sec": 1.5,
+    "imagery_sec": 4.0,
+    "iti_sec": 2.0,
+    "random_seed": 42,
+    "save_epochs_npz": true,
+    "operator": "",
+    "notes": "",
+    "board_name": "Cyton (0)"
+  },
+  "sampling_rate_hz": 250.0,
+  "selected_eeg_rows": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8
+  ],
+  "marker_row": 23,
+  "timestamp_row": 22,
+  "sample_count": 81048,
+  "duration_sec": 324.192,
+  "brainflow_eeg_unit": "microvolt",
+  "saved_fif_unit": "volt",
+  "epochs_unit": "volt",
+  "quality_report": {
+    "overall_std_uV": 4968.7685546875,
+    "overall_peak_to_peak_uV": 18508.046875,
+    "channels": [
+      {
+        "channel_name": "C3",
+        "std_uV": 1294.671875,
+        "peak_to_peak_uV": 7346.39453125,
+        "rms_uV": 66065.4453125
+      },
+      {
+        "channel_name": "Cz",
+        "std_uV": 1017.5720825195312,
+        "peak_to_peak_uV": 4898.609375,
+        "rms_uV": 68451.1640625
+      },
+      {
+        "channel_name": "C4",
+        "std_uV": 1395.906494140625,
+        "peak_to_peak_uV": 5523.1640625,
+        "rms_uV": 71392.0703125
+      },
+      {
+        "channel_name": "PO3",
+        "std_uV": 749.9981689453125,
+        "peak_to_peak_uV": 3538.078125,
+        "rms_uV": 67365.0
+      },
+      {
+        "channel_name": "PO4",
+        "std_uV": 690.0343017578125,
+        "peak_to_peak_uV": 2902.890625,
+        "rms_uV": 66591.875
+      },
+      {
+        "channel_name": "O1",
+        "std_uV": 454.1049499511719,
+        "peak_to_peak_uV": 2005.359375,
+        "rms_uV": 70407.328125
+      },
+      {
+        "channel_name": "Oz",
+        "std_uV": 549.18310546875,
+        "peak_to_peak_uV": 2138.70703125,
+        "rms_uV": 63986.015625
+      },
+      {
+        "channel_name": "O2",
+        "std_uV": 219.29273986816406,
+        "peak_to_peak_uV": 1118.859375,
+        "rms_uV": 80924.609375
+      }
+    ]
+  },
+  "event_count": 164,
+  "run_index": 1,
+  "run_stem": "sub-001_ses-20260329_213131_run-001_tpc-05_n-020_ok-020",
+  "trial_count": 20,
+  "accepted_trial_count": 20,
+  "rejected_trial_count": 0,
+  "epochs_saved": 20,
+  "session_start_wall_time": "2026-03-29T21:32:19.725",
+  "session_end_wall_time": "2026-03-29T21:37:43.911",
+  "first_board_timestamp": 1774791168.0,
+  "last_board_timestamp": 1774791424.0,
+  "files": {
+    "session_raw_fif": "D:\\DC01\\mi_classifier_portable_20260329\\datasets\\custom_mi\\sub-001\\ses-20260329_213131\\sub-001_ses-20260329_213131_run-001_tpc-05_n-020_ok-020_raw.fif",
+    "events_csv": "D:\\DC01\\mi_classifier_portable_20260329\\datasets\\custom_mi\\sub-001\\ses-20260329_213131\\sub-001_ses-20260329_213131_run-001_tpc-05_n-020_ok-020_events.csv",
+    "trials_csv": "D:\\DC01\\mi_classifier_portable_20260329\\datasets\\custom_mi\\sub-001\\ses-20260329_213131\\sub-001_ses-20260329_213131_run-001_tpc-05_n-020_ok-020_trials.csv",
+    "session_meta_json": "D:\\DC01\\mi_classifier_portable_20260329\\datasets\\custom_mi\\sub-001\\ses-20260329_213131\\sub-001_ses-20260329_213131_run-001_tpc-05_n-020_ok-020_session_meta.json",
+    "quality_report_json": "D:\\DC01\\mi_classifier_portable_20260329\\datasets\\custom_mi\\sub-001\\ses-20260329_213131\\sub-001_ses-20260329_213131_run-001_tpc-05_n-020_ok-020_quality_report.json",
+    "epochs_npz": "D:\\DC01\\mi_classifier_portable_20260329\\datasets\\custom_mi\\sub-001\\ses-20260329_213131\\sub-001_ses-20260329_213131_run-001_tpc-05_n-020_ok-020_epochs.npz"
+  }
+}
