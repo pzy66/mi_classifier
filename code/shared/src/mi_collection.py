@@ -357,7 +357,8 @@ def build_balanced_trial_sequence(
 
             min_count = min(counts[name] for name in candidates)
             preferred = [name for name in candidates if counts[name] == min_count]
-            chosen = str(rng.choice(np.asarray(preferred, dtype=object)).item())
+            chosen_token = rng.choice(np.asarray(preferred, dtype=object))
+            chosen = str(chosen_token.item() if hasattr(chosen_token, "item") else chosen_token)
             sequence.append(chosen)
             counts[chosen] -= 1
 
@@ -395,10 +396,16 @@ def create_session_folder(output_root: str | Path, subject_id: str, session_id: 
 
 
 def _next_run_index(session_dir: Path) -> int:
-    """Return next run index under one session directory."""
+    """Return next run index under one session directory.
+
+    Scan every run-scoped artifact, not only metadata, so a failed partial save
+    still reserves its run index and cannot be overwritten by a retry.
+    """
     run_pattern = re.compile(r"_run-(\d{3})_")
     max_index = 0
-    for path in session_dir.glob("*_session_meta.json"):
+    for path in session_dir.glob("*"):
+        if not path.is_file():
+            continue
         matched = run_pattern.search(path.name)
         if matched:
             max_index = max(max_index, int(matched.group(1)))
@@ -462,27 +469,43 @@ def _attach_sample_indices(
     event_log: list[dict[str, object]],
     recorded_markers: list[dict[str, object]],
 ) -> list[dict[str, object]]:
-    """Match runtime events to the recorded BrainFlow marker channel in order."""
+    """Match runtime events to the recorded BrainFlow marker channel in order.
+
+    The runtime event log and marker channel must be a strict 1:1 match. If a
+    marker is missing, duplicated, or reordered, abort saving instead of
+    producing silently corrupted labels.
+    """
+    expected_codes = [int(event["marker_code"]) for event in event_log]
+    recorded_codes = [int(marker["marker_code"]) for marker in recorded_markers]
+    if len(expected_codes) != len(recorded_codes):
+        raise ValueError(
+            "Marker sequence length mismatch: "
+            f"expected {len(expected_codes)} events, recorded {len(recorded_codes)} markers."
+        )
+
+    first_mismatch_index = next(
+        (
+            index
+            for index, (expected_code, recorded_code) in enumerate(zip(expected_codes, recorded_codes))
+            if int(expected_code) != int(recorded_code)
+        ),
+        None,
+    )
+    if first_mismatch_index is not None:
+        expected_event = event_log[first_mismatch_index]
+        recorded_marker = recorded_markers[first_mismatch_index]
+        raise ValueError(
+            "Marker sequence mismatch at position "
+            f"{first_mismatch_index}: expected code {int(expected_event['marker_code'])} "
+            f"({expected_event.get('event_name', '')}), recorded code {int(recorded_marker['marker_code'])} "
+            f"({recorded_marker.get('event_name', '')})."
+        )
+
     enriched: list[dict[str, object]] = []
-    search_start = 0
-
-    for event in event_log:
-        event_code = int(event["marker_code"])
-        matched_marker = None
-        for marker_index in range(search_start, len(recorded_markers)):
-            marker = recorded_markers[marker_index]
-            if int(marker["marker_code"]) == event_code:
-                matched_marker = marker
-                search_start = marker_index + 1
-                break
-
+    for event, matched_marker in zip(event_log, recorded_markers):
         merged = dict(event)
-        if matched_marker is not None:
-            merged["sample_index"] = int(matched_marker["sample_index"])
-            merged["absolute_sample_index"] = int(matched_marker["absolute_sample_index"])
-        else:
-            merged["sample_index"] = None
-            merged["absolute_sample_index"] = None
+        merged["sample_index"] = int(matched_marker["sample_index"])
+        merged["absolute_sample_index"] = int(matched_marker["absolute_sample_index"])
         enriched.append(merged)
 
     return enriched

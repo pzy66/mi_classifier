@@ -1,5 +1,0 @@
-﻿trial_id,class_name,display_name,accepted,baseline_onset_sample,baseline_offset_sample,cue_onset_sample,imagery_onset_sample,imagery_offset_sample,iti_onset_sample,iti_offset_sample,trial_end_sample,note
-1,tongue,舌头想象,1,6020,7036,7037,7410,8682,8683,9685,9685,
-2,feet,双脚想象,1,9687,10703,10704,11093,12350,12351,13368,13368,
-3,right_hand,右手想象,1,13370,14371,14372,14760,16018,16019,,,
-4,left_hand,左手想象,1,,,,,,,,,

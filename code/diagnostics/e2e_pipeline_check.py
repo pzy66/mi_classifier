@@ -55,7 +55,7 @@ if str(TRAINING_ROOT) not in sys.path:
 if str(VIEWER_ROOT) not in sys.path:
     sys.path.insert(0, str(VIEWER_ROOT))
 
-from src.mi_collection import MI_CLASSES, SessionSettings, TrialRecord, make_event, save_mi_session
+from src.mi_collection import MI_CLASSES, SessionSettings, TrialRecord, create_session_folder, make_event, save_mi_session
 from src.realtime_mi import RealtimeMIPredictor, load_realtime_model
 from train_custom_dataset import train_custom_model
 from mi_npz_viewer import discover_epoch_files, load_epochs_npz
@@ -151,11 +151,11 @@ def _build_synthetic_capture(run_cfg: SimulatedRun) -> tuple[np.ndarray, list[di
     return data, events, trials
 
 
-def _save_one_run(*, session_id: str, run_cfg: SimulatedRun) -> dict:
+def _save_one_run(*, session_id: str, run_cfg: SimulatedRun, subject_id: str = "001") -> dict:
     """Call save_mi_session with synthetic payload."""
     data, events, trials = _build_synthetic_capture(run_cfg)
     settings = SessionSettings(
-        subject_id="001",
+        subject_id=subject_id,
         session_id=session_id,
         output_root=str(DATASET_ROOT),
         board_id=0,
@@ -185,6 +185,73 @@ def _save_one_run(*, session_id: str, run_cfg: SimulatedRun) -> dict:
     )
 
 
+def _assert_partial_artifact_reserves_run_index() -> dict:
+    """A stale partial artifact must reserve its run index and prevent overwrite."""
+    session_dir = create_session_folder(DATASET_ROOT, "guard", "index_guard")
+    orphan_path = session_dir / "sub-guard_ses-index_guard_run-007_tpc-01_n-004_ok-004_raw.fif"
+    orphan_path.write_bytes(b"partial-save-placeholder")
+    result = _save_one_run(
+        session_id="index_guard",
+        run_cfg=SimulatedRun(trials_per_class=1, bad_trial_ids=set(), seed=21),
+        subject_id="guard",
+    )
+    if int(result["run_index"]) != 8:
+        raise AssertionError(f"expected next run index 8 after orphan artifact, got {result['run_index']}")
+    return {
+        "orphan_path": str(orphan_path),
+        "next_run_index": int(result["run_index"]),
+        "run_stem": str(result["run_stem"]),
+    }
+
+
+def _assert_marker_mismatch_is_rejected() -> str:
+    """Dropping one marker must fail save instead of silently producing bad labels."""
+    data, events, trials = _build_synthetic_capture(SimulatedRun(trials_per_class=2, bad_trial_ids=set(), seed=99))
+    broken_event = events[5]
+    marker_code = int(broken_event["marker_code"])
+    marker_hits = np.flatnonzero(np.isclose(data[10], float(marker_code)))
+    if marker_hits.size == 0:
+        raise AssertionError("synthetic marker not found for mismatch test")
+    data[10, int(marker_hits[0])] = 0.0
+
+    settings = SessionSettings(
+        subject_id="guard",
+        session_id="marker_mismatch",
+        output_root=str(DATASET_ROOT),
+        board_id=0,
+        serial_port="COM3",
+        channel_names=["C3", "Cz", "C4", "PO3", "PO4", "O1", "Oz", "O2"],
+        channel_positions=[0, 1, 2, 3, 4, 5, 6, 7],
+        trials_per_class=2,
+        baseline_sec=2.0,
+        cue_sec=1.0,
+        imagery_sec=4.0,
+        iti_sec=2.5,
+        random_seed=42,
+        save_epochs_npz=True,
+        operator="e2e-check",
+        notes="synthetic marker mismatch check",
+        board_name="Synthetic",
+    )
+    try:
+        save_mi_session(
+            brainflow_data=data,
+            sampling_rate=250.0,
+            eeg_rows=[0, 1, 2, 3, 4, 5, 6, 7],
+            marker_row=10,
+            timestamp_row=11,
+            settings=settings,
+            event_log=events,
+            trial_records=trials,
+        )
+    except ValueError as error:
+        message = str(error)
+        if "Marker sequence" not in message:
+            raise AssertionError(f"unexpected mismatch error: {message}") from error
+        return message
+    raise AssertionError("marker mismatch did not fail save")
+
+
 def run_e2e_check() -> dict:
     """Execute full pipeline verification."""
     if RUNTIME_ROOT.exists():
@@ -194,6 +261,8 @@ def run_e2e_check() -> dict:
     # 1) Collection/save simulation (two runs, different trial counts).
     run1 = _save_one_run(session_id="e2e_session", run_cfg=SimulatedRun(trials_per_class=4, bad_trial_ids=set(), seed=7))
     run2 = _save_one_run(session_id="e2e_session", run_cfg=SimulatedRun(trials_per_class=2, bad_trial_ids={1}, seed=13))
+    index_guard = _assert_partial_artifact_reserves_run_index()
+    mismatch_guard_message = _assert_marker_mismatch_is_rejected()
 
     session_dir = Path(run1["session_dir"])
     manifest_path = Path(run2["manifest_csv_path"])
@@ -247,6 +316,10 @@ def run_e2e_check() -> dict:
             "discovered_npz_count": len(discovered),
             "first_npz_shape": list(loaded_preview[0].X_uV.shape) if loaded_preview else [],
             "first_npz_sampling_rate": float(loaded_preview[0].sampling_rate) if loaded_preview else None,
+        },
+        "guards": {
+            "partial_artifact_run_index": index_guard,
+            "marker_mismatch_rejected": mismatch_guard_message,
         },
         "training": {
             "pipeline_tag": pipeline_tag,
