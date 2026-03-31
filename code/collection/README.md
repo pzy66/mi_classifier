@@ -48,14 +48,16 @@ python code/collection/mi_data_collector.py --subject-id 001 --session-id 202603
 
 每次会话阶段顺序：
 
-1. `quality_check`
+1. 连接设备后，操作员先在当前界面观察原始波形（raw EEG、无滤波、无预处理）
 2. `calibration`
 3. `practice`
-4. `MI runs`
-5. `idle_block`
-6. `idle_prepare`
-7. `continuous`
-8. 自动保存
+4. 前半段 `MI runs`
+5. 中途插入短 `continuous`
+6. 后半段 `MI runs`
+7. 末尾再插入短 `continuous`
+8. `idle_block`
+9. `idle_prepare`
+10. 自动保存
 
 默认关键参数：
 
@@ -64,6 +66,15 @@ python code/collection/mi_data_collector.py --subject-id 001 --session-id 202603
 - `baseline/cue/imagery/iti = 2.0/1.0/4.0/2.5s`
 - `max_consecutive_same_class=2`
 - run 休息 `90s`，每 2 个 run 长休 `180s`
+- `quality_check_sec=45s` 仅作开始前人工观察参考，不写入正式事件流
+- `continuous = 2 x 150s`，默认插在完成 MI run 2 和 run 4 后
+
+continuous 参数约束：
+
+- `continuous_block_count <= run_count`
+- `continuous_command_max_sec >= continuous_command_min_sec`
+- `continuous_gap_max_sec >= continuous_gap_min_sec`
+- `continuous_block_sec >= continuous_command_min_sec`
 
 ## 5. 单窗口 / 双窗口
 
@@ -72,7 +83,11 @@ python code/collection/mi_data_collector.py --subject-id 001 --session-id 202603
 - 操作员窗口：参数配置、设备状态、控制按钮
 - 受试者窗口：全屏提示词与倒计时
 
-如果需要单窗口流程，可在 UI 中关闭该选项。
+实际行为：
+
+- 连接成功后，先留在操作员窗口观察 raw 波形和调参数
+- 点击 `开始采集` 后，如启用受试者全屏，当前屏幕切到受试者提示界面
+- 如果关闭该选项，则整场采集都在操作员窗口显示
 
 ## 6. 采集中操作
 
@@ -92,6 +107,12 @@ python code/collection/mi_data_collector.py --subject-id 001 --session-id 202603
   - trial 阶段标记坏试次
   - continuous 阶段标记当前命令失败（`execution_success=0`）
 - `Esc`：停止并保存
+
+提示音与暂停行为：
+
+- 每个 `imagery` 开始时播放开始提示音
+- 每个 `imagery` 结束时播放结束提示音
+- 在 `continuous` 中暂停后恢复，命令时间轴会继续沿暂停前的有效时间推进，不把暂停空档算进 prompt 调度
 
 ## 7. 保存内容
 

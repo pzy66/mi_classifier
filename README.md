@@ -79,34 +79,48 @@ mi_classifier/
 
 ### 3.2 默认流程顺序
 
-每次会话按以下阶段推进：
+每次会话按以下顺序推进：
 
-1. `quality_check`
+1. 连接设备后，操作员在当前界面观察原始波形（raw EEG、无滤波、无预处理；`quality_check_sec` 仅作建议观察时长，不写入正式阶段）
 2. `calibration`（open/closed/eye/blink/swallow/jaw/head）
 3. `practice`
-4. `MI runs`
-5. `idle_block`
-6. `idle_prepare`
-7. `continuous`
-8. 保存导出
+4. 前半段 `MI runs`
+5. 中途插入短 `continuous`
+6. 后半段 `MI runs`
+7. 末尾再插入短 `continuous`
+8. `idle_block`
+9. `idle_prepare`
+10. 保存导出
 
 ### 3.3 默认关键参数
 
 - 主 trial：`baseline=2.0s, cue=1.0s, imagery=4.0s, iti=2.5s`
+- 数据采集：保存原始 EEG，不在采集端做滤波、去趋势或其他预处理
 - run：`trials_per_class=10, run_count=4`
 - run 休息：`90s`，每 2 个 run 长休 `180s`
-- quality_check：`45s`
+- quality_check 参考观察时长：`45s`（仅用于开始前人工确认信号稳定性）
 - calibration：`120/60/60/30/30/30/30s`
 - practice：`180s`
 - idle：`2 x 90s`
 - prepare：`1 x 90s`
-- continuous：`2 x 150s`，命令 `3-6s`，间隔 `1-3s`
+- continuous：`2 x 150s`，命令 `3-6s`，间隔 `1-3s`，默认插在完成 MI run 2 和 run 4 后
+
+continuous 参数约束：
+
+- `continuous_block_count <= run_count`
+- `continuous_command_max_sec >= continuous_command_min_sec`
+- `continuous_gap_max_sec >= continuous_gap_min_sec`
+- `continuous_block_sec >= continuous_command_min_sec`
 
 ### 3.4 单/双窗口说明
 
 当前默认 `use_separate_participant_screen = True`（双窗口，受试者全屏提示）。
 
-如果你想单窗口运行，可在采集 UI 中关闭该选项。
+当前行为：
+
+- 连接设备后，始终先停留在操作员界面做参数确认和 raw 波形观察
+- 点击 `开始采集` 后，如果启用了受试者全屏，当前屏幕会切到受试者提示界面
+- 如果关闭该选项，则整场采集都在操作员窗口内完成
 
 ### 3.5 快捷键
 
@@ -115,6 +129,12 @@ mi_classifier/
   - trial 阶段：标记坏试次
   - continuous 阶段：标记当前命令执行失败（`execution_success=0`）
 - `Esc`：停止并保存
+
+提示音：
+
+- 每个 trial 的 `imagery` 开始时播放开始提示音
+- `imagery` 结束、进入 `iti` 时播放结束提示音
+- `continuous` 中按 `Space` 暂停后，恢复时会继续沿暂停前的命令时间轴推进，不会把暂停空档计入 prompt 时长
 
 ### 3.6 保存结构与文件
 

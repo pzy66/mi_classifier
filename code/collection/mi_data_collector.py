@@ -966,6 +966,7 @@ class MIDataCollectorWindow(QMainWindow):
         self.current_phase = "idle"
         self.phase_deadline = 0.0
         self.phase_started_perf = 0.0
+        self.pause_started_perf = 0.0
         self.remaining_phase_sec = 0.0
         self.session_start_perf = 0.0
         self.sequence: list[str] = []
@@ -1798,6 +1799,8 @@ class MIDataCollectorWindow(QMainWindow):
         continuous_block_sec = float(self.continuous_sec_spin.value())
         if continuous_block_count > 0 and continuous_block_sec > 0 and continuous_block_count > run_count:
             raise ValueError("连续模式段数不能大于 MI run 数。当前流程每个 run 边界最多插入一段连续模式。")
+        if continuous_block_count > 0 and continuous_block_sec > 0 and continuous_block_sec < continuous_command_min_sec:
+            raise ValueError("连续模式时长不能小于命令最短时长，否则无法生成任何连续命令。")
 
         raw_artifact_types = self.artifact_types_edit.text().strip()
         artifact_types = normalize_artifact_types(raw_artifact_types)
@@ -2519,9 +2522,11 @@ class MIDataCollectorWindow(QMainWindow):
         prompts: list[dict[str, object]] = []
         prompt_index = 0
         while current < block_duration_sec:
-            duration = float(rng.uniform(command_min, command_max))
-            if current + duration > block_duration_sec:
+            remaining_time = float(block_duration_sec - current)
+            if remaining_time < command_min:
                 break
+            duration_high = min(command_max, remaining_time)
+            duration = float(rng.uniform(command_min, duration_high))
             label_token = rng.choice(np.asarray(labels, dtype=object))
             label = str(label_token.item() if hasattr(label_token, "item") else label_token)
             prompt_index += 1
@@ -2593,6 +2598,13 @@ class MIDataCollectorWindow(QMainWindow):
         self.continuous_block_index += 1
         duration_sec = float(self.current_settings.continuous_block_sec)
         self.continuous_prompt_plan = self._build_continuous_prompt_plan(block_duration_sec=duration_sec)
+        if not self.continuous_prompt_plan:
+            self.continuous_block_index = max(0, self.continuous_block_index - 1)
+            self.show_error("连续模式配置无法生成任何命令计划，请调整连续模式时长或命令时长后重新开始采集。")
+            self.current_phase = "idle"
+            self.current_continuous_prompt = None
+            self.finish_session_and_request_save(manual_stop=True)
+            return
         self.continuous_prompt_index = -1
         self.current_continuous_prompt = None
         self.record_event("continuous_block_start", block_index=self.continuous_block_index)
@@ -2712,6 +2724,7 @@ class MIDataCollectorWindow(QMainWindow):
         del title, subtitle
         self.current_phase = phase
         self.session_paused = False
+        self.pause_started_perf = 0.0
         self.remaining_phase_sec = max(0.0, float(duration_sec))
         self.phase_started_perf = time.perf_counter()
         self.phase_deadline = time.perf_counter() + self.remaining_phase_sec
@@ -3008,7 +3021,9 @@ class MIDataCollectorWindow(QMainWindow):
             return
 
         if not self.session_paused:
-            self.remaining_phase_sec = max(0.0, self.phase_deadline - time.perf_counter())
+            pause_perf = time.perf_counter()
+            self.remaining_phase_sec = max(0.0, self.phase_deadline - pause_perf)
+            self.pause_started_perf = pause_perf
             self.session_paused = True
             self.phase_timer.stop()
             if self.current_trial is not None:
@@ -3036,8 +3051,13 @@ class MIDataCollectorWindow(QMainWindow):
             self._sync_participant_display()
             self.log("采集已暂停。")
         else:
+            resume_perf = time.perf_counter()
             self.session_paused = False
-            self.phase_deadline = time.perf_counter() + self.remaining_phase_sec
+            paused_duration = max(0.0, resume_perf - self.pause_started_perf) if self.pause_started_perf > 0 else 0.0
+            if self.phase_started_perf > 0:
+                self.phase_started_perf += paused_duration
+            self.pause_started_perf = 0.0
+            self.phase_deadline = resume_perf + self.remaining_phase_sec
             if self.current_trial is not None:
                 self.record_event(
                     "resume",
@@ -3165,6 +3185,7 @@ class MIDataCollectorWindow(QMainWindow):
 
         self.phase_timer.stop()
         self.session_paused = False
+        self.pause_started_perf = 0.0
 
         if self.session_running:
             if self.current_phase == "quality_check":
@@ -3389,6 +3410,7 @@ class MIDataCollectorWindow(QMainWindow):
         self.phase_timer.stop()
         self.session_running = False
         self.session_paused = False
+        self.pause_started_perf = 0.0
         self.current_phase = "idle"
         self.phase_label.setText("标记失败")
         self.countdown_label.setText("本次会话未保存，请检查设备连接和标记写入后重试。")
@@ -3513,6 +3535,7 @@ class MIDataCollectorWindow(QMainWindow):
         self.session_paused = False
         self.current_phase = "idle"
         self.phase_started_perf = 0.0
+        self.pause_started_perf = 0.0
         self.phase_timer.stop()
         self.sequence = []
         self.sequence_by_run = []
