@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -64,6 +65,71 @@ DISPLAY_NAME_MAP = {
     "feet": "FEET",
     "tongue": "TONGUE",
 }
+REQUIRED_PREPROCESSING_KEYS = (
+    "bandpass",
+    "optimized_input_bandpass",
+    "notch",
+    "apply_car",
+    "standardize",
+    "epoch_window",
+    "window_offset_sec",
+)
+
+
+def _as_float_pair(value: object, *, field_name: str) -> list[float]:
+    """Validate and normalize two-element numeric lists used by preprocessing config."""
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        raise ValueError(f"Artifact preprocessing field '{field_name}' must be a length-2 list.")
+    low = float(value[0])
+    high = float(value[1])
+    if not np.isfinite(low) or not np.isfinite(high):
+        raise ValueError(f"Artifact preprocessing field '{field_name}' must be finite numbers.")
+    if low >= high:
+        raise ValueError(f"Artifact preprocessing field '{field_name}' must satisfy low < high.")
+    return [low, high]
+
+
+def _preprocessing_fingerprint(preprocessing: dict[str, object]) -> str:
+    """Build a deterministic fingerprint for artifact preprocessing payloads."""
+    serialized = json.dumps(preprocessing, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _resolve_required_preprocessing_config(artifact: dict) -> dict[str, object]:
+    """Return a validated preprocessing config; raise when mandatory fields are missing."""
+    preproc_cfg = artifact.get("preprocessing")
+    if not isinstance(preproc_cfg, dict):
+        raise ValueError("Realtime artifact is missing dict field 'preprocessing'.")
+    missing = [field for field in REQUIRED_PREPROCESSING_KEYS if field not in preproc_cfg]
+    if missing:
+        raise ValueError(
+            "Realtime artifact preprocessing is incomplete. Missing fields: "
+            f"{missing}. Re-export model from latest training pipeline."
+        )
+
+    normalized = {
+        "bandpass": _as_float_pair(preproc_cfg["bandpass"], field_name="bandpass"),
+        "optimized_input_bandpass": _as_float_pair(
+            preproc_cfg["optimized_input_bandpass"],
+            field_name="optimized_input_bandpass",
+        ),
+        "notch": (None if preproc_cfg["notch"] is None else float(preproc_cfg["notch"])),
+        "apply_car": bool(preproc_cfg["apply_car"]),
+        "standardize": bool(preproc_cfg["standardize"]),
+        "epoch_window": _as_float_pair(preproc_cfg["epoch_window"], field_name="epoch_window"),
+        "window_offset_sec": float(preproc_cfg["window_offset_sec"]),
+        "window_offset_secs_used": [
+            float(item)
+            for item in (
+                preproc_cfg.get("window_offset_secs_used")
+                if isinstance(preproc_cfg.get("window_offset_secs_used"), (list, tuple))
+                else [float(preproc_cfg["window_offset_sec"])]
+            )
+        ],
+    }
+    if normalized["notch"] is not None and normalized["notch"] <= 0.0:
+        raise ValueError("Artifact preprocessing field 'notch' must be positive when provided.")
+    return normalized
 
 
 def parse_channel_names(raw_value: str | list[str] | None) -> list[str]:
@@ -165,6 +231,10 @@ def build_realtime_artifact_bank(
         members.extend(_flatten_realtime_artifact_members(artifact))
     if not members:
         raise ValueError("No single-window members were found in the provided artifacts.")
+    for member in members:
+        normalized_preprocessing = _resolve_required_preprocessing_config(member)
+        member["preprocessing"] = normalized_preprocessing
+        member["preprocessing_fingerprint"] = _preprocessing_fingerprint(normalized_preprocessing)
 
     first = members[0]
     required_common_fields = [
@@ -218,6 +288,8 @@ def build_realtime_artifact_bank(
         "fusion_weights": normalized_weights.astype(np.float64).tolist(),
         "fusion_method": str(fusion_method),
         "preprocessing": dict(first.get("preprocessing", {})),
+        "preprocessing_fingerprint": str(first.get("preprocessing_fingerprint", "")),
+        "member_preprocessing_fingerprints": [str(member.get("preprocessing_fingerprint", "")) for member in sorted_members],
         "subject_id": first.get("subject_id"),
         "metrics": {
             "members": [
@@ -271,20 +343,20 @@ def _preprocess_single_window(raw_window: np.ndarray, artifact: dict, live_sampl
             working = resample(working, expected_samples, axis=-1).astype(np.float32)
         effective_fs = model_sampling_rate
 
-    preproc_cfg = artifact["preprocessing"]
+    preproc_cfg = _resolve_required_preprocessing_config(artifact)
     processed = preprocess_trials(
         working[np.newaxis, ...],
         {
             "dataset": {"sampling_rate": effective_fs},
             "preprocessing": {
-                "bandpass": preproc_cfg.get("bandpass", [8.0, 30.0]),
-                "notch": preproc_cfg.get("notch"),
-                "apply_car": preproc_cfg.get("apply_car", True),
-                "standardize": preproc_cfg.get("standardize", True),
+                "bandpass": list(preproc_cfg["bandpass"]),
+                "notch": preproc_cfg["notch"],
+                "apply_car": bool(preproc_cfg["apply_car"]),
+                "standardize": bool(preproc_cfg["standardize"]),
             },
             "model": {
                 "type": artifact["model_type"],
-                "optimized_input_bandpass": preproc_cfg.get("optimized_input_bandpass", [4.0, 40.0]),
+                "optimized_input_bandpass": list(preproc_cfg["optimized_input_bandpass"]),
             },
         },
         model_type=artifact["model_type"],
@@ -366,6 +438,17 @@ def fit_realtime_model(
     test_predictions = np.argmax(test_probabilities, axis=1)
 
     class_names = list(config["dataset"]["class_names"])
+    epoch_window = [float(item) for item in list(config["preprocessing"]["epoch_window"])]
+    preprocessing_payload = {
+        "bandpass": [float(item) for item in list(config["preprocessing"]["bandpass"])],
+        "optimized_input_bandpass": [float(item) for item in list(config["model"]["optimized_input_bandpass"])],
+        "notch": None if config["preprocessing"]["notch"] is None else float(config["preprocessing"]["notch"]),
+        "apply_car": bool(config["preprocessing"]["apply_car"]),
+        "standardize": bool(config["preprocessing"]["standardize"]),
+        "epoch_window": epoch_window,
+        "window_offset_sec": 0.0,
+        "window_offset_secs_used": [0.0],
+    }
     artifact = {
         "pipeline": best_pipeline,
         "probability_calibration": dict(best_probability_calibration),
@@ -377,14 +460,9 @@ def fit_realtime_model(
         "channel_names": channel_names,
         "channel_indices": channel_indices,
         "sampling_rate": float(config["dataset"]["sampling_rate"]),
-        "window_sec": float(config["preprocessing"]["epoch_window"][1] - config["preprocessing"]["epoch_window"][0]),
-        "preprocessing": {
-            "bandpass": list(config["preprocessing"].get("bandpass", [8.0, 30.0])),
-            "optimized_input_bandpass": list(config["model"].get("optimized_input_bandpass", [4.0, 40.0])),
-            "notch": config["preprocessing"].get("notch"),
-            "apply_car": bool(config["preprocessing"].get("apply_car", True)),
-            "standardize": bool(config["preprocessing"].get("standardize", True)),
-        },
+        "window_sec": float(epoch_window[1] - epoch_window[0]),
+        "preprocessing": dict(preprocessing_payload),
+        "preprocessing_fingerprint": _preprocessing_fingerprint(preprocessing_payload),
         "metrics": {
             "val_acc": float(best_val_acc),
             "test_acc": float(accuracy_score(y_test, test_predictions)),
@@ -433,6 +511,8 @@ def load_realtime_model(
 
     artifact = joblib.load(Path(model_path))
     if str(artifact.get("artifact_type", "single_window")) == "multi_window_bank":
+        for member in _flatten_realtime_artifact_members(artifact):
+            _resolve_required_preprocessing_config(member)
         if fusion_weights is None:
             return artifact
         rebuilt = build_realtime_artifact_bank(
@@ -444,6 +524,7 @@ def load_realtime_model(
             if key not in rebuilt:
                 rebuilt[key] = value
         return rebuilt
+    _resolve_required_preprocessing_config(artifact)
     return artifact
 
 

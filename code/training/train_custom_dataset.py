@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -83,6 +84,26 @@ DEFAULT_DEEP_STAGE_PRETRAIN_WINDOW_SECS = [2.5, 2.0]
 DEFAULT_DEEP_STAGE_FINETUNE_WINDOW_SECS = [2.0, 1.5]
 DEFAULT_CENTRAL_PRIOR_ALPHA = 0.75
 DEFAULT_CENTRAL_AUX_LOSS_WEIGHT = 0.3
+DEFAULT_PREPROCESS_BANDPASS = (4.0, 40.0)
+DEFAULT_PREPROCESS_NOTCH = 50.0
+DEFAULT_PREPROCESS_APPLY_CAR = True
+DEFAULT_PREPROCESS_STANDARDIZE = False
+STRICT_MAIN_SPLIT_STRATEGIES = {"group_shuffle", "session_holdout"}
+STRICT_AUX_SPLIT_STRATEGIES = {"group_shuffle", "session_holdout", "aligned_to_main_split"}
+DEFAULT_SELECTION_OBJECTIVE_SPEC = {
+    "name": "offline_plus_continuous_weighted",
+    "components": {
+        "bank_kappa": {"weight": 0.35, "direction": "maximize"},
+        "bank_macro_f1": {"weight": 0.25, "direction": "maximize"},
+        "continuous_mi_prompt_accuracy": {"weight": 0.25, "direction": "maximize"},
+        "continuous_no_control_specificity": {"weight": 0.15, "direction": "maximize"},
+    },
+    "continuous_no_control_specificity_formula": "1 - no_control_false_activation_rate",
+    "fallback_when_no_continuous": {
+        "bank_kappa": {"weight": 0.60, "direction": "maximize"},
+        "bank_macro_f1": {"weight": 0.40, "direction": "maximize"},
+    },
+}
 RUN_STEM_PATTERN = re.compile(
     r"sub-(?P<subject>.+?)_ses-(?P<session>.+?)_run-(?P<run>\d{3})_tpc-(?P<tpc>\d+)_n-(?P<n>\d+)_ok-(?P<ok>\d+)$"
 )
@@ -1276,11 +1297,42 @@ def preprocess_trials(X: np.ndarray, sampling_rate: float) -> np.ndarray:
     return preprocess(
         X,
         fs=float(sampling_rate),
-        bandpass=(4.0, 40.0),
-        notch=50.0,
-        apply_car=True,
-        standardize_data=False,
+        bandpass=DEFAULT_PREPROCESS_BANDPASS,
+        notch=DEFAULT_PREPROCESS_NOTCH,
+        apply_car=DEFAULT_PREPROCESS_APPLY_CAR,
+        standardize_data=DEFAULT_PREPROCESS_STANDARDIZE,
     )
+
+
+def build_preprocessing_config(
+    *,
+    window_sec: float,
+    window_offset_sec: float,
+    window_offset_secs_used: list[float] | None = None,
+) -> dict[str, object]:
+    """Build the preprocessing payload saved into each realtime artifact."""
+    offset_candidates = [float(item) for item in (window_offset_secs_used or [window_offset_sec])]
+    return {
+        "bandpass": [float(DEFAULT_PREPROCESS_BANDPASS[0]), float(DEFAULT_PREPROCESS_BANDPASS[1])],
+        "optimized_input_bandpass": [float(DEFAULT_PREPROCESS_BANDPASS[0]), float(DEFAULT_PREPROCESS_BANDPASS[1])],
+        "notch": float(DEFAULT_PREPROCESS_NOTCH),
+        "apply_car": bool(DEFAULT_PREPROCESS_APPLY_CAR),
+        "standardize": bool(DEFAULT_PREPROCESS_STANDARDIZE),
+        "epoch_window": [0.0, float(window_sec)],
+        "window_offset_sec": float(window_offset_sec),
+        "window_offset_secs_used": offset_candidates,
+    }
+
+
+def preprocessing_fingerprint(preprocessing_config: dict[str, object]) -> str:
+    """Return a deterministic fingerprint so train/realtime preprocessing can be audited."""
+    serialized = json.dumps(
+        dict(preprocessing_config),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
 def validate_dataset_distribution(
@@ -1483,6 +1535,60 @@ def metric_sort_key(metrics: dict[str, object]) -> tuple[float, float, float]:
         float(metrics.get("macro_acc", 0.0)),
         float(metrics.get("acc", 0.0)),
     )
+
+
+def _clip_unit_interval(value: float) -> float:
+    """Clamp a float into [0, 1]."""
+    return float(np.clip(float(value), 0.0, 1.0))
+
+
+def compute_selection_objective_score(
+    *,
+    metrics: dict[str, object],
+    continuous_summary: dict[str, object],
+) -> dict[str, object]:
+    """Compute a deployment-oriented objective score from offline + continuous metrics."""
+    bank_kappa = _clip_unit_interval(float(metrics.get("bank_kappa", 0.0)))
+    bank_macro_f1 = _clip_unit_interval(float(metrics.get("bank_macro_f1", 0.0)))
+    components = {
+        "bank_kappa": bank_kappa,
+        "bank_macro_f1": bank_macro_f1,
+    }
+
+    continuous_available = bool(continuous_summary.get("available", False))
+    if continuous_available:
+        mi_prompt_accuracy = _clip_unit_interval(float(continuous_summary.get("mi_prompt_accuracy", 0.0)))
+        no_control_specificity = _clip_unit_interval(
+            1.0 - float(continuous_summary.get("no_control_false_activation_rate", 1.0))
+        )
+        components["continuous_mi_prompt_accuracy"] = mi_prompt_accuracy
+        components["continuous_no_control_specificity"] = no_control_specificity
+        weights = {
+            "bank_kappa": 0.35,
+            "bank_macro_f1": 0.25,
+            "continuous_mi_prompt_accuracy": 0.25,
+            "continuous_no_control_specificity": 0.15,
+        }
+    else:
+        weights = {
+            "bank_kappa": 0.60,
+            "bank_macro_f1": 0.40,
+        }
+
+    weight_sum = float(sum(float(weight) for weight in weights.values()))
+    if weight_sum <= 0.0:
+        score = 0.0
+    else:
+        score = float(
+            sum(float(weights[name]) * float(components.get(name, 0.0)) for name in weights.keys()) / weight_sum
+        )
+    return {
+        "score": _clip_unit_interval(score),
+        "continuous_available": bool(continuous_available),
+        "components": {str(name): float(value) for name, value in components.items()},
+        "weights": {str(name): float(value) for name, value in weights.items()},
+        "spec": dict(DEFAULT_SELECTION_OBJECTIVE_SPEC),
+    }
 
 
 def _predict_probability_matrix(model, X: np.ndarray, n_classes: int) -> np.ndarray:
@@ -2407,6 +2513,7 @@ def split_trials(
     random_state: int,
     class_count: int,
     max_group_attempts: int = 64,
+    allow_trial_stratified_fallback: bool = True,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, str]:
     """Split trials into train/val/test with session->run->trial fallback priority."""
     y = np.asarray(y, dtype=np.int64)
@@ -2473,6 +2580,12 @@ def split_trials(
             if split_contains_all_classes(y[train_idx], class_count) and split_contains_all_classes(y[val_idx], class_count):
                 return train_idx, val_idx, test_idx, "group_shuffle"
 
+    if not allow_trial_stratified_fallback:
+        raise RuntimeError(
+            "Unable to build a group/session split with full class coverage. "
+            "Collect more runs/sessions or pass --allow-trial-level-fallback."
+        )
+
     trainval_idx, test_idx = train_test_split(
         np.arange(y.shape[0]),
         test_size=0.2,
@@ -2512,6 +2625,47 @@ def split_by_group_sets(
     if not split_contains_all_classes(y[test_idx], class_count):
         return None
     return train_idx, val_idx, test_idx
+
+
+def _sorted_tokens(values: np.ndarray) -> list[str]:
+    """Convert token-like arrays to sorted unique string tokens."""
+    if np.asarray(values).size == 0:
+        return []
+    return sorted(set(str(item) for item in np.asarray(values, dtype=object).tolist()))
+
+
+def summarize_split_assignments(
+    *,
+    groups: np.ndarray,
+    sessions: np.ndarray | None,
+    split_indices: dict[str, np.ndarray],
+) -> dict[str, dict[str, object]]:
+    """Summarize sample/group/session membership for each split partition."""
+    result: dict[str, dict[str, object]] = {}
+    groups = np.asarray(groups, dtype=object)
+    sessions_array = (
+        np.asarray(sessions, dtype=object)
+        if sessions is not None and np.asarray(sessions).shape[0] == groups.shape[0]
+        else np.asarray([], dtype=object)
+    )
+    for split_name, indices in split_indices.items():
+        split_idx = np.asarray(indices, dtype=np.int64)
+        split_groups = np.asarray(groups[split_idx], dtype=object) if split_idx.size else np.asarray([], dtype=object)
+        split_sessions = (
+            np.asarray(sessions_array[split_idx], dtype=object)
+            if split_idx.size and sessions_array.shape[0] == groups.shape[0]
+            else np.asarray([], dtype=object)
+        )
+        group_tokens = _sorted_tokens(split_groups)
+        session_tokens = _sorted_tokens(split_sessions)
+        result[str(split_name)] = {
+            "sample_count": int(split_idx.size),
+            "group_count": int(len(group_tokens)),
+            "session_count": int(len(session_tokens)),
+            "groups": group_tokens,
+            "sessions": session_tokens,
+        }
+    return result
 
 
 def make_member_output_path(output_model_path: Path, window_sec: float) -> Path:
@@ -2611,6 +2765,7 @@ def train_custom_model(
     recommended_total_class_trials: int = DEFAULT_RECOMMENDED_TOTAL_CLASS_TRIALS,
     recommended_run_class_trials: int = DEFAULT_RECOMMENDED_RUN_CLASS_TRIALS,
     enforce_readiness: bool = False,
+    allow_trial_level_fallback: bool = False,
     window_secs: list[float] | None = None,
     window_offset_secs: list[float] | None = None,
     fusion_method: str = DEFAULT_FUSION_METHOD,
@@ -2713,9 +2868,10 @@ def train_custom_model(
         session_labels=session_labels,
         random_state=int(random_state),
         class_count=len(class_names),
+        allow_trial_stratified_fallback=bool(allow_trial_level_fallback),
     )
     print(f"split_strategy={split_strategy}")
-    if split_strategy not in {"group_shuffle", "session_holdout"}:
+    if split_strategy not in STRICT_MAIN_SPLIT_STRATEGIES:
         print(
             "warning=insufficient distinct runs for group-based split; "
             "evaluation may be optimistic because fallback trial-level stratification was used"
@@ -2790,6 +2946,7 @@ def train_custom_model(
         and (X_gate_neg_all.shape[0] + X_gate_hard_neg_all.shape[0]) > 0
     )
     gate_split_strategy = "unavailable"
+    gate_split_block_reason: str | None = None
     gate_X_all = np.empty((0, X_raw.shape[1], 0), dtype=np.float32)
     gate_y_all = np.empty((0,), dtype=np.int64)
     gate_groups_all = np.asarray([], dtype=object)
@@ -2853,6 +3010,7 @@ def train_custom_model(
                 session_labels=gate_sessions_all,
                 random_state=int(random_state) + 77,
                 class_count=2,
+                allow_trial_stratified_fallback=bool(allow_trial_level_fallback),
             )
         gate_split_indices = {
             "train": gate_train_idx,
@@ -2860,6 +3018,23 @@ def train_custom_model(
             "test": gate_test_idx,
             "trainval": np.concatenate([gate_train_idx, gate_val_idx], axis=0),
         }
+        if gate_split_strategy not in STRICT_AUX_SPLIT_STRATEGIES:
+            message = (
+                "Gate split resolved to trial-level stratification fallback; "
+                "collect more rest/control runs for leakage-safe gate evaluation."
+            )
+            if allow_trial_level_fallback:
+                print(f"warning={message}")
+            else:
+                gate_available = False
+                gate_split_strategy = "strict_split_unavailable"
+                gate_split_block_reason = message
+                gate_split_indices = {
+                    "train": np.asarray([], dtype=np.int64),
+                    "val": np.asarray([], dtype=np.int64),
+                    "test": np.asarray([], dtype=np.int64),
+                    "trainval": np.asarray([], dtype=np.int64),
+                }
 
     X_artifact_all = np.asarray(artifact_loaded.get("X_artifact", np.empty((0, X_raw.shape[1], 0), dtype=np.float32)), dtype=np.float32)
     X_clean_negative_all = np.asarray(artifact_loaded.get("X_clean_negative", np.empty((0, X_raw.shape[1], 0), dtype=np.float32)), dtype=np.float32)
@@ -2870,6 +3045,7 @@ def train_custom_model(
 
     artifact_rejector_available = bool(X_artifact_all.shape[0] > 0 and X_clean_negative_all.shape[0] > 0)
     artifact_split_strategy = "unavailable"
+    artifact_split_block_reason: str | None = None
     artifact_binary_X_all = np.empty((0, X_raw.shape[1], 0), dtype=np.float32)
     artifact_binary_y_all = np.empty((0,), dtype=np.int64)
     artifact_binary_groups_all = np.asarray([], dtype=object)
@@ -2910,6 +3086,7 @@ def train_custom_model(
                 session_labels=artifact_binary_sessions_all,
                 random_state=int(random_state) + 133,
                 class_count=2,
+                allow_trial_stratified_fallback=bool(allow_trial_level_fallback),
             )
         artifact_split_indices = {
             "train": artifact_train_idx,
@@ -2917,6 +3094,39 @@ def train_custom_model(
             "test": artifact_test_idx,
             "trainval": np.concatenate([artifact_train_idx, artifact_val_idx], axis=0),
         }
+        if artifact_split_strategy not in STRICT_AUX_SPLIT_STRATEGIES:
+            message = (
+                "Artifact split resolved to trial-level stratification fallback; "
+                "collect more artifact/clean runs for leakage-safe artifact evaluation."
+            )
+            if allow_trial_level_fallback:
+                print(f"warning={message}")
+            else:
+                artifact_rejector_available = False
+                artifact_split_strategy = "strict_split_unavailable"
+                artifact_split_block_reason = message
+                artifact_split_indices = {
+                    "train": np.asarray([], dtype=np.int64),
+                    "val": np.asarray([], dtype=np.int64),
+                    "test": np.asarray([], dtype=np.int64),
+                    "trainval": np.asarray([], dtype=np.int64),
+                }
+
+    mi_split_assignments = summarize_split_assignments(
+        groups=groups,
+        sessions=session_labels,
+        split_indices=split_indices,
+    )
+    gate_split_assignments = summarize_split_assignments(
+        groups=gate_groups_all,
+        sessions=gate_sessions_all,
+        split_indices=gate_split_indices,
+    )
+    artifact_split_assignments = summarize_split_assignments(
+        groups=artifact_binary_groups_all,
+        sessions=artifact_binary_sessions_all,
+        split_indices=artifact_split_indices,
+    )
 
     rest_segments_all = [np.asarray(item, dtype=np.float32) for item in X_gate_neg_all] if X_gate_neg_all.ndim == 3 else []
     rest_source_phases_all = np.asarray(["gate_neg"] * len(rest_segments_all), dtype=object)
@@ -3252,6 +3462,12 @@ def train_custom_model(
         member_output_path.parent.mkdir(parents=True, exist_ok=True)
         member_report_path.parent.mkdir(parents=True, exist_ok=True)
 
+        member_preprocessing = build_preprocessing_config(
+            window_sec=float(window_sec),
+            window_offset_sec=float(best_offset_sec),
+            window_offset_secs_used=[float(item) for item in selected_offset_secs],
+        )
+        member_preprocessing_hash = preprocessing_fingerprint(member_preprocessing)
         member_artifact = {
             "artifact_type": "single_window",
             "pipeline": final_pipeline,
@@ -3268,13 +3484,8 @@ def train_custom_model(
             "window_offset_sec": float(best_offset_sec),
             "window_offset_secs_used": [float(item) for item in selected_offset_secs],
             "training_mode": "multi_offset_augmented",
-            "preprocessing": {
-                "bandpass": [8.0, 30.0],
-                "optimized_input_bandpass": [4.0, 40.0],
-                "notch": 50.0,
-                "apply_car": True,
-                "standardize": False,
-            },
+            "preprocessing": dict(member_preprocessing),
+            "preprocessing_fingerprint": member_preprocessing_hash,
             "metrics": {
                 "val_acc": float(best_selection_metrics["acc"]),
                 "val_kappa": float(best_selection_metrics["kappa"]),
@@ -3317,6 +3528,8 @@ def train_custom_model(
             "training_mode": "multi_offset_augmented",
             "selected_pipeline": best_name,
             "probability_calibration": dict(best_probability_calibration),
+            "preprocessing": dict(member_preprocessing),
+            "preprocessing_fingerprint": member_preprocessing_hash,
             "metrics": member_artifact["metrics"],
             "candidate_scores": candidate_scores,
             "candidate_errors": candidate_errors,
@@ -3447,6 +3660,12 @@ def train_custom_model(
                 gate_val_probability_vectors.append(best_gate_val_probabilities)
                 gate_test_probability_vectors.append(gate_test_probabilities)
 
+                gate_preprocessing = build_preprocessing_config(
+                    window_sec=float(window_sec),
+                    window_offset_sec=0.0,
+                    window_offset_secs_used=[0.0],
+                )
+                gate_preprocessing_hash = preprocessing_fingerprint(gate_preprocessing)
                 gate_member_artifact = {
                     "artifact_type": "single_window",
                     "pipeline": final_gate_pipeline,
@@ -3461,13 +3680,8 @@ def train_custom_model(
                     "sampling_rate": sampling_rate,
                     "window_sec": float(window_sec),
                     "window_offset_sec": 0.0,
-                    "preprocessing": {
-                        "bandpass": [8.0, 30.0],
-                        "optimized_input_bandpass": [4.0, 40.0],
-                        "notch": 50.0,
-                        "apply_car": True,
-                        "standardize": False,
-                    },
+                    "preprocessing": dict(gate_preprocessing),
+                    "preprocessing_fingerprint": gate_preprocessing_hash,
                     "metrics": {
                         "val_acc": float(best_gate_metrics["acc"]),
                         "val_kappa": float(best_gate_metrics["kappa"]),
@@ -3490,7 +3704,7 @@ def train_custom_model(
                     "dataset_root": str(dataset_root),
                     "source_sessions": loaded["session_paths"],
                     "source_records": loaded["source_records"],
-                    "split_strategy": split_strategy,
+                    "split_strategy": gate_split_strategy,
                     "created_at": datetime.now().isoformat(timespec="seconds"),
                 }
                 gate_member_artifacts.append(gate_member_artifact)
@@ -3499,6 +3713,8 @@ def train_custom_model(
                     "window_sec": float(window_sec),
                     "selected_pipeline": best_gate_name,
                     "probability_calibration": dict(best_gate_probability_calibration),
+                    "preprocessing": dict(gate_preprocessing),
+                    "preprocessing_fingerprint": gate_preprocessing_hash,
                     "metrics": gate_member_artifact["metrics"],
                     "candidate_scores": gate_candidate_scores,
                     "candidate_errors": gate_candidate_errors,
@@ -3640,6 +3856,12 @@ def train_custom_model(
                 artifact_val_probability_vectors.append(best_artifact_val_probabilities)
                 artifact_test_probability_vectors.append(artifact_test_probabilities)
 
+                artifact_preprocessing = build_preprocessing_config(
+                    window_sec=float(window_sec),
+                    window_offset_sec=0.0,
+                    window_offset_secs_used=[0.0],
+                )
+                artifact_preprocessing_hash = preprocessing_fingerprint(artifact_preprocessing)
                 artifact_member_artifact = {
                     "artifact_type": "single_window",
                     "pipeline": final_artifact_pipeline,
@@ -3654,13 +3876,8 @@ def train_custom_model(
                     "sampling_rate": sampling_rate,
                     "window_sec": float(window_sec),
                     "window_offset_sec": 0.0,
-                    "preprocessing": {
-                        "bandpass": [8.0, 30.0],
-                        "optimized_input_bandpass": [4.0, 40.0],
-                        "notch": 50.0,
-                        "apply_car": True,
-                        "standardize": False,
-                    },
+                    "preprocessing": dict(artifact_preprocessing),
+                    "preprocessing_fingerprint": artifact_preprocessing_hash,
                     "metrics": {
                         "val_acc": float(best_artifact_metrics["acc"]),
                         "val_kappa": float(best_artifact_metrics["kappa"]),
@@ -3682,7 +3899,7 @@ def train_custom_model(
                     "dataset_root": str(dataset_root),
                     "source_sessions": loaded["session_paths"],
                     "source_records": loaded["source_records"],
-                    "split_strategy": split_strategy,
+                    "split_strategy": artifact_split_strategy,
                     "created_at": datetime.now().isoformat(timespec="seconds"),
                 }
                 artifact_member_artifacts.append(artifact_member_artifact)
@@ -3693,6 +3910,8 @@ def train_custom_model(
                     "probability_calibration": dict(best_artifact_probability_calibration),
                     "candidate_names": list(selected_artifact_candidate_names),
                     "class_names": list(ARTIFACT_REJECTOR_CLASS_NAMES),
+                    "preprocessing": dict(artifact_preprocessing),
+                    "preprocessing_fingerprint": artifact_preprocessing_hash,
                     "metrics": artifact_member_artifact["metrics"],
                     "candidate_scores": artifact_candidate_scores,
                     "candidate_errors": artifact_candidate_errors,
@@ -3812,6 +4031,7 @@ def train_custom_model(
     bank_artifact["source_records"] = loaded["source_records"]
     bank_artifact["window_offset_secs"] = [float(item) for item in selected_offset_secs]
     bank_artifact["split_strategy"] = split_strategy
+    bank_artifact["split_assignments"] = mi_split_assignments
     bank_artifact["candidate_names"] = list(selected_candidate_names)
     bank_artifact["gate_candidate_names"] = list(selected_gate_candidate_names)
     bank_artifact["artifact_candidate_names"] = list(selected_artifact_candidate_names)
@@ -3824,12 +4044,22 @@ def train_custom_model(
     ]
     bank_artifact["central_prior_alpha"] = float(central_prior_alpha)
     bank_artifact["central_aux_loss_weight"] = float(central_aux_loss_weight)
+    bank_preprocessing = dict(bank_artifact.get("preprocessing", {}))
+    bank_artifact["preprocessing"] = bank_preprocessing
+    bank_artifact["preprocessing_fingerprint"] = (
+        preprocessing_fingerprint(bank_preprocessing) if bank_preprocessing else ""
+    )
+    bank_artifact["member_preprocessing_fingerprints"] = [
+        str(item.get("preprocessing_fingerprint", ""))
+        for item in member_artifacts
+    ]
 
     gate_runtime = None
     gate_summary: dict[str, object] = {
         "enabled": False,
         "candidate_names": list(selected_gate_candidate_names),
         "available_member_count": int(len(gate_member_artifacts)),
+        "strict_split_block_reason": gate_split_block_reason,
     }
     if (
         gate_member_artifacts
@@ -3972,6 +4202,16 @@ def train_custom_model(
         gate_bank_artifact["candidate_names"] = list(selected_gate_candidate_names)
         gate_bank_artifact["window_offset_secs"] = [float(item) for item in selected_offset_secs]
         gate_bank_artifact["split_strategy"] = gate_split_strategy
+        gate_bank_artifact["split_assignments"] = gate_split_assignments
+        gate_bank_preprocessing = dict(gate_bank_artifact.get("preprocessing", {}))
+        gate_bank_artifact["preprocessing"] = gate_bank_preprocessing
+        gate_bank_artifact["preprocessing_fingerprint"] = (
+            preprocessing_fingerprint(gate_bank_preprocessing) if gate_bank_preprocessing else ""
+        )
+        gate_bank_artifact["member_preprocessing_fingerprints"] = [
+            str(item.get("preprocessing_fingerprint", ""))
+            for item in gate_member_artifacts
+        ]
         gate_calibration = dict(gate_runtime.get("calibration") or {})
         gate_per_class_test_acc = {
             str(name): float(value)
@@ -4006,6 +4246,7 @@ def train_custom_model(
                 "candidate_names": list(selected_gate_candidate_names),
                 "available_member_count": int(len(gate_member_artifacts)),
                 "split_strategy": gate_split_strategy,
+                "strict_split_block_reason": gate_split_block_reason,
                 "auto_disabled": True,
                 "auto_disable_reasons": gate_auto_disable_reasons,
                 "metrics": gate_bank_artifact["metrics"],
@@ -4023,6 +4264,7 @@ def train_custom_model(
                 "metrics": gate_bank_artifact["metrics"],
                 "member_models": gate_member_summaries,
                 "split_strategy": gate_split_strategy,
+                "strict_split_block_reason": gate_split_block_reason,
             }
             bank_artifact["control_gate"] = gate_bank_artifact
     else:
@@ -4035,6 +4277,7 @@ def train_custom_model(
         "class_names": list(ARTIFACT_REJECTOR_CLASS_NAMES),
         "available_member_count": int(len(artifact_member_artifacts)),
         "split_strategy": artifact_split_strategy,
+        "strict_split_block_reason": artifact_split_block_reason,
     }
     if (
         artifact_member_artifacts
@@ -4177,6 +4420,16 @@ def train_custom_model(
         artifact_bank_artifact["candidate_names"] = list(selected_artifact_candidate_names)
         artifact_bank_artifact["window_offset_secs"] = [0.0]
         artifact_bank_artifact["split_strategy"] = artifact_split_strategy
+        artifact_bank_artifact["split_assignments"] = artifact_split_assignments
+        artifact_bank_preprocessing = dict(artifact_bank_artifact.get("preprocessing", {}))
+        artifact_bank_artifact["preprocessing"] = artifact_bank_preprocessing
+        artifact_bank_artifact["preprocessing_fingerprint"] = (
+            preprocessing_fingerprint(artifact_bank_preprocessing) if artifact_bank_preprocessing else ""
+        )
+        artifact_bank_artifact["member_preprocessing_fingerprints"] = [
+            str(item.get("preprocessing_fingerprint", ""))
+            for item in artifact_member_artifacts
+        ]
         artifact_calibration = dict(artifact_runtime.get("calibration") or {})
         artifact_per_class_test_acc = {
             str(name): float(value)
@@ -4212,6 +4465,7 @@ def train_custom_model(
                 "class_names": list(ARTIFACT_REJECTOR_CLASS_NAMES),
                 "available_member_count": int(len(artifact_member_artifacts)),
                 "split_strategy": artifact_split_strategy,
+                "strict_split_block_reason": artifact_split_block_reason,
                 "auto_disabled": True,
                 "auto_disable_reasons": artifact_auto_disable_reasons,
                 "metrics": artifact_bank_artifact["metrics"],
@@ -4230,6 +4484,7 @@ def train_custom_model(
                 "metrics": artifact_bank_artifact["metrics"],
                 "member_models": artifact_member_summaries,
                 "split_strategy": artifact_split_strategy,
+                "strict_split_block_reason": artifact_split_block_reason,
             }
             bank_artifact["artifact_rejector"] = artifact_bank_artifact
     else:
@@ -4329,61 +4584,166 @@ def train_custom_model(
     else:
         rest_calibration_summary["mode"] = "legacy_imagery_only_no_rest_segments"
 
-    continuous_summary = evaluate_continuous_online_like(
-        continuous_records=list(continuous_loaded.get("records", [])),
-        main_member_artifacts=member_artifacts,
-        main_fusion_weights=list(bank_artifact["fusion_weights"]),
-        main_fusion_method=fusion_method,
-        main_probability_calibration=bank_artifact.get("probability_calibration"),
-        class_names=class_names,
-        sampling_rate=sampling_rate,
-        main_runtime=recommended_runtime,
-        gate_member_artifacts=gate_member_artifacts if bank_artifact.get("control_gate") else None,
-        gate_fusion_weights=(
-            list(bank_artifact["control_gate"]["fusion_weights"])
-            if isinstance(bank_artifact.get("control_gate"), dict)
-            else None
-        ),
-        gate_fusion_method=(
-            str(bank_artifact["control_gate"].get("fusion_method", fusion_method))
-            if isinstance(bank_artifact.get("control_gate"), dict)
-            else fusion_method
-        ),
-        gate_probability_calibration=(
-            dict(bank_artifact["control_gate"].get("probability_calibration") or {})
-            if isinstance(bank_artifact.get("control_gate"), dict)
-            else None
-        ),
-        gate_runtime=gate_runtime,
-        artifact_member_artifacts=artifact_member_artifacts if bank_artifact.get("artifact_rejector") else None,
-        artifact_fusion_weights=(
-            list(bank_artifact["artifact_rejector"]["fusion_weights"])
-            if isinstance(bank_artifact.get("artifact_rejector"), dict)
-            else None
-        ),
-        artifact_fusion_method=(
-            str(bank_artifact["artifact_rejector"].get("fusion_method", fusion_method))
-            if isinstance(bank_artifact.get("artifact_rejector"), dict)
-            else fusion_method
-        ),
-        artifact_probability_calibration=(
-            dict(bank_artifact["artifact_rejector"].get("probability_calibration") or {})
-            if isinstance(bank_artifact.get("artifact_rejector"), dict)
-            else None
-        ),
-        artifact_runtime=artifact_runtime,
+    gate_model_artifact = bank_artifact.get("control_gate") if isinstance(bank_artifact.get("control_gate"), dict) else None
+    artifact_model_artifact = (
+        bank_artifact.get("artifact_rejector")
+        if isinstance(bank_artifact.get("artifact_rejector"), dict)
+        else None
     )
+    continuous_variants = [
+        {
+            "name": "main_only",
+            "use_gate": False,
+            "use_artifact": False,
+        }
+    ]
+    if gate_model_artifact is not None:
+        continuous_variants.append(
+            {
+                "name": "main_plus_gate",
+                "use_gate": True,
+                "use_artifact": False,
+            }
+        )
+    if artifact_model_artifact is not None:
+        continuous_variants.append(
+            {
+                "name": "main_plus_artifact",
+                "use_gate": False,
+                "use_artifact": True,
+            }
+        )
+    if gate_model_artifact is not None and artifact_model_artifact is not None:
+        continuous_variants.append(
+            {
+                "name": "full_stack",
+                "use_gate": True,
+                "use_artifact": True,
+            }
+        )
+
+    continuous_variant_results: list[dict[str, object]] = []
+    for variant in continuous_variants:
+        use_gate = bool(variant["use_gate"])
+        use_artifact = bool(variant["use_artifact"])
+        variant_summary = evaluate_continuous_online_like(
+            continuous_records=list(continuous_loaded.get("records", [])),
+            main_member_artifacts=member_artifacts,
+            main_fusion_weights=list(bank_artifact["fusion_weights"]),
+            main_fusion_method=fusion_method,
+            main_probability_calibration=bank_artifact.get("probability_calibration"),
+            class_names=class_names,
+            sampling_rate=sampling_rate,
+            main_runtime=recommended_runtime,
+            gate_member_artifacts=gate_member_artifacts if use_gate else None,
+            gate_fusion_weights=(
+                list(gate_model_artifact["fusion_weights"])
+                if use_gate and gate_model_artifact is not None
+                else None
+            ),
+            gate_fusion_method=(
+                str(gate_model_artifact.get("fusion_method", fusion_method))
+                if use_gate and gate_model_artifact is not None
+                else fusion_method
+            ),
+            gate_probability_calibration=(
+                dict(gate_model_artifact.get("probability_calibration") or {})
+                if use_gate and gate_model_artifact is not None
+                else None
+            ),
+            gate_runtime=gate_runtime if use_gate else None,
+            artifact_member_artifacts=artifact_member_artifacts if use_artifact else None,
+            artifact_fusion_weights=(
+                list(artifact_model_artifact["fusion_weights"])
+                if use_artifact and artifact_model_artifact is not None
+                else None
+            ),
+            artifact_fusion_method=(
+                str(artifact_model_artifact.get("fusion_method", fusion_method))
+                if use_artifact and artifact_model_artifact is not None
+                else fusion_method
+            ),
+            artifact_probability_calibration=(
+                dict(artifact_model_artifact.get("probability_calibration") or {})
+                if use_artifact and artifact_model_artifact is not None
+                else None
+            ),
+            artifact_runtime=artifact_runtime if use_artifact else None,
+        )
+        objective = compute_selection_objective_score(
+            metrics=bank_artifact["metrics"],
+            continuous_summary=variant_summary,
+        )
+        continuous_variant_results.append(
+            {
+                "name": str(variant["name"]),
+                "use_gate": use_gate,
+                "use_artifact": use_artifact,
+                "continuous": variant_summary,
+                "selection_objective": objective,
+            }
+        )
+
+    best_variant = max(
+        continuous_variant_results,
+        key=lambda item: (
+            float(item["selection_objective"]["score"]),
+            float((item["continuous"] or {}).get("mi_prompt_accuracy", 0.0)),
+            -float((item["continuous"] or {}).get("no_control_false_activation_rate", 1.0)),
+            int(bool(item.get("use_gate"))) + int(bool(item.get("use_artifact"))),
+        ),
+    )
+    selected_variant_name = str(best_variant["name"])
+    selected_use_gate = bool(best_variant.get("use_gate", False))
+    selected_use_artifact = bool(best_variant.get("use_artifact", False))
+    continuous_summary = dict(best_variant.get("continuous") or {})
+    continuous_summary["selection_objective"] = dict(best_variant.get("selection_objective") or {})
+    continuous_summary["selected_variant"] = selected_variant_name
+    continuous_summary["evaluated_variants"] = [
+        {
+            "name": str(item["name"]),
+            "use_gate": bool(item["use_gate"]),
+            "use_artifact": bool(item["use_artifact"]),
+            "selection_objective_score": float(item["selection_objective"]["score"]),
+            "selection_objective_components": dict(item["selection_objective"]["components"]),
+            "continuous_available": bool(item["continuous"].get("available", False)),
+            "mi_prompt_accuracy": float(item["continuous"].get("mi_prompt_accuracy", 0.0)),
+            "no_control_false_activation_rate": float(item["continuous"].get("no_control_false_activation_rate", 0.0)),
+            "evaluated_prompt_count": int(item["continuous"].get("evaluated_prompt_count", 0)),
+        }
+        for item in continuous_variant_results
+    ]
     continuous_summary["decision_order"] = [
         "bad_window_rejector",
         "control_gate",
         "main_mi_classifier",
     ]
 
+    if gate_model_artifact is not None and not selected_use_gate:
+        gate_summary = dict(gate_summary)
+        gate_summary["enabled"] = False
+        gate_summary["selection_disabled"] = True
+        gate_summary["selection_disable_reasons"] = [
+            f"continuous_objective_selected_variant:{selected_variant_name}",
+        ]
+    if artifact_model_artifact is not None and not selected_use_artifact:
+        artifact_rejector_summary = dict(artifact_rejector_summary)
+        artifact_rejector_summary["enabled"] = False
+        artifact_rejector_summary["selection_disabled"] = True
+        artifact_rejector_summary["selection_disable_reasons"] = [
+            f"continuous_objective_selected_variant:{selected_variant_name}",
+        ]
+
+    bank_artifact["control_gate"] = gate_model_artifact if selected_use_gate else None
+    bank_artifact["artifact_rejector"] = artifact_model_artifact if selected_use_artifact else None
+
     bank_artifact["recommended_runtime"] = recommended_runtime
     bank_artifact["rest_calibration"] = rest_calibration_summary
     bank_artifact["control_gate_summary"] = gate_summary
     bank_artifact["artifact_rejector_summary"] = artifact_rejector_summary
     bank_artifact["continuous_online_like_eval"] = continuous_summary
+    bank_artifact["selection_objective"] = dict(continuous_summary.get("selection_objective") or {})
+    bank_artifact["selected_runtime_variant"] = selected_variant_name
     joblib.dump(bank_artifact, output_model_path)
 
     summary = {
@@ -4397,6 +4757,17 @@ def train_custom_model(
             "gate": gate_split_strategy,
             "artifact": artifact_split_strategy,
         },
+        "split_assignments": {
+            "mi": mi_split_assignments,
+            "gate": gate_split_assignments,
+            "artifact": artifact_split_assignments,
+        },
+        "train_groups": list(mi_split_assignments["train"]["groups"]),
+        "val_groups": list(mi_split_assignments["val"]["groups"]),
+        "test_groups": list(mi_split_assignments["test"]["groups"]),
+        "train_sessions": list(mi_split_assignments["train"]["sessions"]),
+        "val_sessions": list(mi_split_assignments["val"]["sessions"]),
+        "test_sessions": list(mi_split_assignments["test"]["sessions"]),
         "candidate_names": list(selected_candidate_names),
         "gate_candidate_names": list(selected_gate_candidate_names),
         "artifact_candidate_names": list(selected_artifact_candidate_names),
@@ -4412,6 +4783,9 @@ def train_custom_model(
         "fusion_method": fusion_method,
         "fusion_weights": bank_artifact["fusion_weights"],
         "probability_calibration": bank_artifact.get("probability_calibration"),
+        "preprocessing": dict(bank_artifact.get("preprocessing", {})),
+        "preprocessing_fingerprint": str(bank_artifact.get("preprocessing_fingerprint", "")),
+        "member_preprocessing_fingerprints": list(bank_artifact.get("member_preprocessing_fingerprints", [])),
         "window_secs": [float(item) for item in bank_artifact["window_secs"]],
         "window_offset_secs": [float(item) for item in selected_offset_secs],
         "metrics": bank_artifact["metrics"],
@@ -4437,16 +4811,21 @@ def train_custom_model(
         "label_distribution": label_distribution,
         "dataset_readiness": dataset_readiness,
         "enforce_readiness": bool(enforce_readiness),
+        "allow_trial_level_fallback": bool(allow_trial_level_fallback),
         "recommended_runtime": recommended_runtime,
         "rest_calibration": rest_calibration_summary,
         "control_gate": gate_summary,
         "artifact_rejector": artifact_rejector_summary,
         "continuous_online_like_eval": continuous_summary,
+        "selection_objective": dict(continuous_summary.get("selection_objective") or {}),
+        "selected_runtime_variant": selected_variant_name,
         "continuous_prompt_count": int(continuous_loaded.get("prompt_count", 0)),
         "continuous_record_count": int(continuous_loaded.get("record_count", 0)),
         "gate_dataset": {
             "available": bool(gate_available),
             "split_strategy": gate_split_strategy,
+            "split_assignments": gate_split_assignments,
+            "strict_split_block_reason": gate_split_block_reason,
             "train_count": int(gate_split_indices["train"].shape[0]) if gate_available else 0,
             "val_count": int(gate_split_indices["val"].shape[0]) if gate_available else 0,
             "test_count": int(gate_split_indices["test"].shape[0]) if gate_available else 0,
@@ -4462,6 +4841,8 @@ def train_custom_model(
         "artifact_dataset": {
             "available": bool(artifact_rejector_available),
             "split_strategy": artifact_split_strategy,
+            "split_assignments": artifact_split_assignments,
+            "strict_split_block_reason": artifact_split_block_reason,
             "train_count": int(artifact_split_indices["train"].shape[0]) if artifact_rejector_available else 0,
             "val_count": int(artifact_split_indices["val"].shape[0]) if artifact_rejector_available else 0,
             "test_count": int(artifact_split_indices["test"].shape[0]) if artifact_rejector_available else 0,
@@ -4507,6 +4888,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--enforce-readiness",
         action="store_true",
         help="Fail training when advisory readiness checks are not met.",
+    )
+    parser.add_argument(
+        "--allow-trial-level-fallback",
+        action="store_true",
+        help=(
+            "Allow trial-level stratified fallback when run/session split is not feasible. "
+            "Disabled by default to enforce leakage-safe group/session holdout."
+        ),
     )
     parser.add_argument(
         "--window-secs",
@@ -4648,6 +5037,7 @@ def main(argv: list[str] | None = None) -> int:
         recommended_total_class_trials=int(args.recommended_total_class_trials),
         recommended_run_class_trials=int(args.recommended_run_class_trials),
         enforce_readiness=bool(args.enforce_readiness),
+        allow_trial_level_fallback=bool(args.allow_trial_level_fallback),
         window_secs=parse_float_list(args.window_secs),
         window_offset_secs=(
             parse_float_list(args.window_offset_secs)
@@ -4741,6 +5131,13 @@ def main(argv: list[str] | None = None) -> int:
             f"evaluated:{int(continuous_summary.get('evaluated_prompt_count', 0))},"
             f"mi_acc:{float(continuous_summary.get('mi_prompt_accuracy', 0.0)):.4f},"
             f"no_control_fa:{float(continuous_summary.get('no_control_false_activation_rate', 0.0)):.4f}"
+        )
+    selection_objective = dict(summary.get("selection_objective") or {})
+    if selection_objective:
+        print(
+            "selection_objective="
+            f"score:{float(selection_objective.get('score', 0.0)):.4f},"
+            f"selected_variant:{str(continuous_summary.get('selected_variant', 'main_only'))}"
         )
     print(f"model_path={summary['model_path']}")
     return 0

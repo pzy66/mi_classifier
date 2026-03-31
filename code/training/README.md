@@ -79,8 +79,10 @@ python code/training/train_custom_dataset.py
 
 - 每类累计 accepted trial 建议 `>=30`
 - 单个 run 内每类 accepted trial 建议 `>=8`
-- 可通过 `--enforce-readiness` 改为不达标即报错
+- `run_02_training.py` / `run_training_pycharm.py` 默认会带 `--enforce-readiness`
+- 可通过 `--enforce-readiness` 手动启用不达标即报错
 - 可通过 `--recommended-total-class-trials` / `--recommended-run-class-trials` 调整阈值
+- 默认强制使用 `session_holdout/group_shuffle/aligned_to_main_split`；若确实需要旧的 trial 级回退，可显式加 `--allow-trial-level-fallback`
 
 ## 6. 候选模型
 
@@ -151,5 +153,6 @@ python code/training/train_custom_dataset.py `
 - `recommended_artifact_thresholds`
 - `continuous_online_like`（evaluated、mi_acc、no_control_fa）
 - `dataset_readiness_ready / dataset_readiness_warnings`
+- `selection_objective`（offline+continuous 加权分数与 selected_variant）
 
 建议先确认 gate/rejector 是否可用，再做实时测试。

@@ -36,7 +36,7 @@ def main() -> int:
         return 1
 
     try:
-        return train_main([])
+        return train_main(["--enforce-readiness"])
     except Exception as error:
         show_startup_error(
             "Training Failed",
