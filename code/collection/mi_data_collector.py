@@ -13,6 +13,7 @@ from pathlib import Path
 
 import numpy as np
 from brainflow.board_shim import BoardIds, BoardShim, BrainFlowInputParams
+from brainflow.data_filter import DataFilter, DetrendOperations, FilterTypes, NoiseTypes
 from PyQt5.QtCore import QObject, QPointF, QRectF, Qt, QThread, QTimer, pyqtSignal, pyqtSlot
 from PyQt5.QtGui import QBrush, QColor, QFont, QImage, QLinearGradient, QPainter, QPainterPath, QPen
 from PyQt5.QtWidgets import (
@@ -567,7 +568,12 @@ class ParticipantDisplayWindow(QWidget):
 
 
 class RealtimeEEGPreviewWidget(QWidget):
-    """Operator-facing raw EEG preview for signal-quality confirmation."""
+    """Operator-facing EEG/impedance preview for connection quality checks."""
+
+    MODE_EEG = "EEG"
+    MODE_IMPEDANCE = "IMP"
+    LEAD_OFF_CURRENT_AMPS = 6e-9
+    SERIES_RESISTOR_OHMS = 2200.0
 
     CHANNEL_COLORS = [
         "#38BDF8",
@@ -589,7 +595,10 @@ class RealtimeEEGPreviewWidget(QWidget):
         self.buffers: list[deque[float]] = []
         self.last_chunk_perf = 0.0
         self.last_repaint_perf = 0.0
-        self.placeholder_text = f"连接设备后显示最近 {self.window_seconds:.1f} 秒原始波形（无滤波）。"
+        self.mode = self.MODE_EEG
+        self.impedance_channel = 1
+        self.last_impedance_ohms: list[float | None] = []
+        self.placeholder_text = f"连接设备后显示最近 {self.window_seconds:.1f} 秒波形。"
         self._dirty = False
 
         self.setMinimumHeight(420)
@@ -605,6 +614,9 @@ class RealtimeEEGPreviewWidget(QWidget):
         self.channel_names = [str(name) for name in channel_names]
         self.max_points = max(32, int(round(self.window_seconds * self.sampling_rate)))
         self.buffers = [deque(maxlen=self.max_points) for _ in self.channel_names]
+        self.last_impedance_ohms = [None] * len(self.channel_names)
+        self.mode = self.MODE_EEG
+        self.impedance_channel = 1
         self.last_chunk_perf = 0.0
         self.last_repaint_perf = 0.0
         self.placeholder_text = "正在等待实时数据..."
@@ -618,12 +630,36 @@ class RealtimeEEGPreviewWidget(QWidget):
         self.sampling_rate = 0.0
         self.last_chunk_perf = 0.0
         self.last_repaint_perf = 0.0
+        self.mode = self.MODE_EEG
+        self.impedance_channel = 1
+        self.last_impedance_ohms = []
         if message:
             self.placeholder_text = str(message)
         else:
-            self.placeholder_text = f"连接设备后显示最近 {self.window_seconds:.1f} 秒原始波形（无滤波）。"
+            self.placeholder_text = f"连接设备后显示最近 {self.window_seconds:.1f} 秒波形。"
         self._dirty = True
         self.update()
+
+    def set_quality_mode(self, mode: str, *, impedance_channel: int | None = None) -> None:
+        normalized = self.MODE_IMPEDANCE if str(mode).strip().upper().startswith("IMP") else self.MODE_EEG
+        self.mode = normalized
+        if impedance_channel is not None:
+            self.set_impedance_channel(int(impedance_channel))
+        else:
+            self.set_impedance_channel(int(self.impedance_channel))
+        if self.mode == self.MODE_IMPEDANCE:
+            self._update_impedance_value()
+        self._dirty = True
+        self.update()
+
+    def set_impedance_channel(self, channel: int) -> int:
+        channel_count = len(self.channel_names)
+        if channel_count <= 0:
+            self.impedance_channel = 1
+            return self.impedance_channel
+        self.impedance_channel = int(np.clip(int(channel), 1, channel_count))
+        self._dirty = True
+        return self.impedance_channel
 
     def append_chunk(self, eeg_chunk: np.ndarray) -> None:
         if not self.buffers:
@@ -636,6 +672,9 @@ class RealtimeEEGPreviewWidget(QWidget):
         for channel_index, buffer in enumerate(self.buffers):
             buffer.extend(np.asarray(chunk[channel_index], dtype=np.float32).tolist())
 
+        if self.mode == self.MODE_IMPEDANCE:
+            self._update_impedance_value()
+
         self.last_chunk_perf = time.perf_counter()
         self._dirty = True
 
@@ -647,6 +686,53 @@ class RealtimeEEGPreviewWidget(QWidget):
         self.last_repaint_perf = now
         self.update()
 
+    def _estimate_impedance_ohms_from_raw_window(self, y_uvolts: np.ndarray) -> float | None:
+        if y_uvolts is None or y_uvolts.size < 20:
+            return None
+        std_uvolts = float(np.std(y_uvolts, ddof=0))
+        z_ohm = (np.sqrt(2.0) * std_uvolts * 1e-6) / float(self.LEAD_OFF_CURRENT_AMPS)
+        z_ohm -= float(self.SERIES_RESISTOR_OHMS)
+        if not np.isfinite(z_ohm):
+            return None
+        return max(z_ohm, 0.0)
+
+    def _update_impedance_value(self) -> None:
+        active_index = int(self.impedance_channel) - 1
+        if active_index < 0 or active_index >= len(self.buffers):
+            return
+        if active_index >= len(self.last_impedance_ohms):
+            return
+        y_raw = np.asarray(self.buffers[active_index], dtype=np.float64)
+        self.last_impedance_ohms[active_index] = self._estimate_impedance_ohms_from_raw_window(y_raw)
+
+    def _build_plot_signal(self, y_raw: np.ndarray) -> np.ndarray:
+        y = np.asarray(y_raw, dtype=np.float64)
+        if y.size <= 10 or self.mode != self.MODE_EEG or self.sampling_rate <= 1.0:
+            return y
+
+        y_plot = y.copy()
+        try:
+            DataFilter.detrend(y_plot, DetrendOperations.CONSTANT.value)
+        except Exception:
+            pass
+        try:
+            DataFilter.remove_environmental_noise(y_plot, self.sampling_rate, NoiseTypes.FIFTY.value)
+        except Exception:
+            pass
+        try:
+            DataFilter.perform_bandpass(
+                y_plot,
+                self.sampling_rate,
+                1.0,
+                40.0,
+                4,
+                FilterTypes.BUTTERWORTH_ZERO_PHASE.value,
+                0,
+            )
+        except Exception:
+            pass
+        return y_plot
+
     def _draw_placeholder(self, painter: QPainter, rect: QRectF) -> None:
         painter.setPen(QColor("#CBD5E1"))
         painter.setFont(QFont("Microsoft YaHei", 12))
@@ -654,6 +740,9 @@ class RealtimeEEGPreviewWidget(QWidget):
 
     def paintEvent(self, event) -> None:  # noqa: N802
         del event
+        if self.mode == self.MODE_IMPEDANCE:
+            self._update_impedance_value()
+
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
         painter.fillRect(self.rect(), QColor("#08111F"))
@@ -665,12 +754,17 @@ class RealtimeEEGPreviewWidget(QWidget):
 
         header_rect = QRectF(outer_rect.left() + 14, outer_rect.top() + 10, outer_rect.width() - 28, 28)
         painter.setPen(QColor("#E2E8F0"))
-        painter.setFont(QFont("Microsoft YaHei", 11, QFont.Bold))
+        painter.setFont(QFont("Microsoft YaHei", 10, QFont.Bold))
+
         if self.channel_names and self.sampling_rate > 0:
             freshness_sec = 0.0 if self.last_chunk_perf <= 0 else max(0.0, time.perf_counter() - self.last_chunk_perf)
+            if self.mode == self.MODE_EEG:
+                mode_text = "EEG mode (display: detrend + 50Hz + 1-40Hz)"
+            else:
+                mode_text = f"Impedance mode (CH{self.impedance_channel}, raw only)"
             header_text = (
-                f"RAW EEG | {len(self.channel_names)} ch | {self.sampling_rate:g} Hz | "
-                f"window {self.window_seconds:.1f}s | no filter"
+                f"{mode_text} | {len(self.channel_names)} ch | {self.sampling_rate:g} Hz | "
+                f"window {self.window_seconds:.1f}s"
             )
             painter.drawText(header_rect, Qt.AlignLeft | Qt.AlignVCenter, header_text)
             painter.setPen(QColor("#F59E0B" if freshness_sec > 1.0 else "#94A3B8"))
@@ -681,7 +775,7 @@ class RealtimeEEGPreviewWidget(QWidget):
                 f"last update {freshness_sec:.2f}s",
             )
         else:
-            painter.drawText(header_rect, Qt.AlignLeft | Qt.AlignVCenter, "RAW EEG Preview")
+            painter.drawText(header_rect, Qt.AlignLeft | Qt.AlignVCenter, "EEG / Impedance Preview")
 
         content_rect = QRectF(outer_rect.left() + 14, outer_rect.top() + 48, outer_rect.width() - 28, outer_rect.height() - 62)
         if not self.channel_names or not self.buffers:
@@ -692,7 +786,7 @@ class RealtimeEEGPreviewWidget(QWidget):
         row_gap = 8.0
         row_height = max(28.0, (content_rect.height() - row_gap * (channel_count - 1)) / max(1, channel_count))
         label_width = 58.0
-        right_info_width = 64.0
+        right_info_width = 130.0
 
         for channel_index, channel_name in enumerate(self.channel_names):
             row_top = content_rect.top() + channel_index * (row_height + row_gap)
@@ -704,11 +798,13 @@ class RealtimeEEGPreviewWidget(QWidget):
                 max(16.0, row_rect.height() - 8),
             )
 
+            active_impedance_channel = self.mode == self.MODE_IMPEDANCE and (channel_index + 1 == self.impedance_channel)
+            row_fill = QColor("#0E1B2D" if not active_impedance_channel else "#1F2937")
             painter.setPen(Qt.NoPen)
-            painter.setBrush(QColor("#0E1B2D"))
+            painter.setBrush(row_fill)
             painter.drawRoundedRect(row_rect, 10, 10)
 
-            painter.setPen(QColor("#94A3B8"))
+            painter.setPen(QColor("#E2E8F0" if active_impedance_channel else "#94A3B8"))
             painter.setFont(QFont("Consolas", 10, QFont.Bold))
             painter.drawText(
                 QRectF(row_rect.left() + 8, row_rect.top(), label_width - 10, row_rect.height()),
@@ -726,12 +822,14 @@ class RealtimeEEGPreviewWidget(QWidget):
                 QPointF(plot_rect.right(), plot_rect.center().y()),
             )
 
-            y = np.asarray(self.buffers[channel_index], dtype=np.float32)
-            if y.size < 2:
+            y_raw = np.asarray(self.buffers[channel_index], dtype=np.float64)
+            if y_raw.size < 2:
                 painter.setPen(QColor("#64748B"))
                 painter.setFont(QFont("Microsoft YaHei", 9))
                 painter.drawText(plot_rect, Qt.AlignCenter, "waiting...")
                 continue
+
+            y = self._build_plot_signal(y_raw)
 
             if y.size >= 20:
                 low = float(np.percentile(y, 5))
@@ -766,20 +864,50 @@ class RealtimeEEGPreviewWidget(QWidget):
                     waveform.lineTo(x, y_pos)
 
             color = QColor(self.CHANNEL_COLORS[channel_index % len(self.CHANNEL_COLORS)])
-            painter.setPen(QPen(color, 1.35, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            if self.mode == self.MODE_IMPEDANCE and not active_impedance_channel:
+                color.setAlpha(95)
+            painter.setPen(
+                QPen(
+                    color,
+                    1.6 if active_impedance_channel else 1.2,
+                    Qt.SolidLine,
+                    Qt.RoundCap,
+                    Qt.RoundJoin,
+                )
+            )
             painter.drawPath(waveform)
 
-            painter.setPen(QColor("#64748B"))
+            info_text = ""
+            info_color = QColor("#64748B")
+            if self.mode == self.MODE_IMPEDANCE:
+                if active_impedance_channel:
+                    z_ohm = None
+                    if channel_index < len(self.last_impedance_ohms):
+                        z_ohm = self.last_impedance_ohms[channel_index]
+                    if z_ohm is None:
+                        info_text = "Imp: --"
+                    else:
+                        info_text = f"Imp ~ {z_ohm / 1000.0:.1f} kOhm"
+                    info_color = QColor("#FDE68A")
+                else:
+                    info_text = "Imp: --"
+            else:
+                info_text = f"{np.ptp(y_raw):.0f} uV"
+
+            painter.setPen(info_color)
             painter.setFont(QFont("Consolas", 9))
             painter.drawText(
                 QRectF(plot_rect.right() + 6, row_rect.top(), right_info_width - 6, row_rect.height()),
                 Qt.AlignLeft | Qt.AlignVCenter,
-                f"{np.ptp(y):.0f} uV",
+                info_text,
             )
 
 
 class BoardCaptureWorker(QObject):
     """Background BrainFlow worker used only for recording, not analysis."""
+
+    MODE_EEG = "EEG"
+    MODE_IMPEDANCE = "IMP"
 
     connection_ready = pyqtSignal(object)
     preview_data_ready = pyqtSignal(object)
@@ -810,6 +938,81 @@ class BoardCaptureWorker(QObject):
         self.marker_row: int | None = None
         self.timestamp_row: int | None = None
         self.sampling_rate: float | None = None
+
+    @staticmethod
+    def build_impedance_command(channel: int, test_p: bool = True, test_n: bool = False) -> str:
+        p = 1 if test_p else 0
+        n = 1 if test_n else 0
+        return f"z{int(channel)}{p}{n}Z"
+
+    def supports_impedance_mode(self) -> bool:
+        cyton_ids: set[int] = set()
+        for board_name in ("CYTON_BOARD", "CYTON_DAISY_BOARD"):
+            board_enum = getattr(BoardIds, board_name, None)
+            if board_enum is not None:
+                cyton_ids.add(int(board_enum.value))
+        return int(self.board_id) in cyton_ids
+
+    def _selected_channel_count(self) -> int:
+        if self.selected_rows:
+            return max(1, int(len(self.selected_rows)))
+        if self.channel_names:
+            return max(1, int(len(self.channel_names)))
+        try:
+            return max(1, int(len(BoardShim.get_eeg_channels(self.board_id))))
+        except Exception:
+            return 8
+
+    def switch_quality_mode_sync(
+        self,
+        *,
+        target_mode: str,
+        target_channel: int = 1,
+        reset_default: bool = False,
+    ) -> tuple[bool, str]:
+        mode = str(target_mode).strip().upper()
+        if mode not in {self.MODE_EEG, self.MODE_IMPEDANCE}:
+            return False, f"Unsupported preview mode: {target_mode!r}"
+        if mode == self.MODE_IMPEDANCE and not self.supports_impedance_mode():
+            return False, "Impedance mode is available only for Cyton/Cyton Daisy boards."
+
+        with self.board_lock:
+            if self.board is None:
+                return False, "Device is not connected."
+
+            board = self.board
+            channel_count = self._selected_channel_count()
+            channel = int(np.clip(int(target_channel), 1, channel_count))
+
+            try:
+                board.stop_stream()
+            except Exception:
+                pass
+
+            try:
+                if self.supports_impedance_mode():
+                    for ch in range(1, channel_count + 1):
+                        board.config_board(self.build_impedance_command(ch, False, False))
+                    if bool(reset_default) or mode == self.MODE_EEG:
+                        board.config_board("d")
+                    if mode == self.MODE_IMPEDANCE:
+                        board.config_board(self.build_impedance_command(channel, True, False))
+
+                board.start_stream(450000)
+            except Exception as error:
+                try:
+                    board.start_stream(450000)
+                except Exception:
+                    pass
+                return False, f"Failed to switch quality-check mode: {error}"
+
+        if mode == self.MODE_IMPEDANCE:
+            self.status_changed.emit(f"Quality-check mode -> IMPEDANCE (CH{channel})")
+        elif bool(reset_default):
+            self.status_changed.emit("Quality-check mode -> EEG (reset defaults)")
+        else:
+            self.status_changed.emit("Quality-check mode -> EEG")
+        return True, ""
 
     @pyqtSlot()
     def run(self) -> None:
@@ -1005,6 +1208,14 @@ class MIDataCollectorWindow(QMainWindow):
         self.hero_subtitle_label: QLabel | None = None
         self.preview_widget: RealtimeEEGPreviewWidget | None = None
         self.preview_status_label: QLabel | None = None
+        self.preview_mode_label: QLabel | None = None
+        self.preview_to_eeg_button: QPushButton | None = None
+        self.preview_to_imp_button: QPushButton | None = None
+        self.preview_prev_ch_button: QPushButton | None = None
+        self.preview_next_ch_button: QPushButton | None = None
+        self.preview_reset_button: QPushButton | None = None
+        self.preview_mode = RealtimeEEGPreviewWidget.MODE_EEG
+        self.preview_impedance_channel = 1
         self.log_group: QGroupBox | None = None
         self.log_text: QTextEdit | None = None
 
@@ -1602,16 +1813,50 @@ class MIDataCollectorWindow(QMainWindow):
             status_layout.addWidget(label)
         layout.addWidget(status_group)
 
-        preview_group = QGroupBox("连接后质量检查波形（原始）")
+        preview_group = QGroupBox("连接后质量检查（EEG / 阻抗）")
         preview_layout = QVBoxLayout(preview_group)
         self.preview_status_label = QLabel(
-            "连接设备后开始刷新最近 5 秒原始 EEG；请先在实验员界面确认无掉线、坏道、饱和和异常漂移。"
+            "连接设备后先做质量检查：可在 EEG/阻抗模式切换，确认无掉线、坏道、饱和、异常漂移和接触不良。"
         )
         self.preview_status_label.setWordWrap(True)
         self.preview_status_label.setStyleSheet(
             "font-size: 12px; color: #475569; background: #F8FAFC; border-radius: 8px; padding: 6px 8px;"
         )
         preview_layout.addWidget(self.preview_status_label)
+
+        preview_control_layout = QHBoxLayout()
+        self.preview_mode_label = QLabel("Quality mode: waiting for device")
+        self.preview_mode_label.setStyleSheet("font-size: 12px; color: #1E293B;")
+        preview_control_layout.addWidget(self.preview_mode_label, 1)
+
+        self.preview_to_eeg_button = QPushButton("EEG模式")
+        self.preview_to_imp_button = QPushButton("阻抗模式")
+        self.preview_prev_ch_button = QPushButton("上一通道")
+        self.preview_next_ch_button = QPushButton("下一通道")
+        self.preview_reset_button = QPushButton("恢复默认")
+        for button in (
+            self.preview_to_eeg_button,
+            self.preview_to_imp_button,
+            self.preview_prev_ch_button,
+            self.preview_next_ch_button,
+            self.preview_reset_button,
+        ):
+            button.setMinimumHeight(30)
+            button.setEnabled(False)
+
+        self.preview_to_eeg_button.clicked.connect(self.on_preview_to_eeg_clicked)
+        self.preview_to_imp_button.clicked.connect(self.on_preview_to_imp_clicked)
+        self.preview_prev_ch_button.clicked.connect(self.on_preview_prev_channel_clicked)
+        self.preview_next_ch_button.clicked.connect(self.on_preview_next_channel_clicked)
+        self.preview_reset_button.clicked.connect(self.on_preview_reset_clicked)
+
+        preview_control_layout.addWidget(self.preview_to_eeg_button)
+        preview_control_layout.addWidget(self.preview_to_imp_button)
+        preview_control_layout.addWidget(self.preview_prev_ch_button)
+        preview_control_layout.addWidget(self.preview_next_ch_button)
+        preview_control_layout.addWidget(self.preview_reset_button)
+        preview_layout.addLayout(preview_control_layout)
+
         self.preview_widget = RealtimeEEGPreviewWidget(window_seconds=5.0)
         preview_layout.addWidget(self.preview_widget, stretch=1)
         layout.addWidget(preview_group, stretch=1)
@@ -2121,28 +2366,171 @@ class MIDataCollectorWindow(QMainWindow):
         self._update_trial_meta_labels()
         self._sync_participant_display()
 
+    def _preview_channel_count(self) -> int:
+        if self.device_info is not None:
+            rows = self.device_info.get("selected_rows", [])
+            if isinstance(rows, list) and rows:
+                return max(1, int(len(rows)))
+        if self.preview_widget is not None and self.preview_widget.channel_names:
+            return max(1, int(len(self.preview_widget.channel_names)))
+        return max(1, len(DEFAULT_CHANNEL_NAMES))
+
+    def _set_preview_mode_label(self) -> None:
+        if self.preview_mode_label is None:
+            return
+        if self.device_info is None:
+            self.preview_mode_label.setText("Quality mode: waiting for device")
+            return
+        if self.preview_mode == RealtimeEEGPreviewWidget.MODE_IMPEDANCE:
+            self.preview_mode_label.setText(f"Quality mode: IMPEDANCE (CH{self.preview_impedance_channel})")
+        else:
+            self.preview_mode_label.setText("Quality mode: EEG (filtered display only; saving stays raw)")
+
+    def _apply_preview_mode_locally(self, mode: str, *, channel: int | None = None) -> None:
+        normalized = (
+            RealtimeEEGPreviewWidget.MODE_IMPEDANCE
+            if str(mode).strip().upper().startswith("IMP")
+            else RealtimeEEGPreviewWidget.MODE_EEG
+        )
+        channel_count = self._preview_channel_count()
+        target_channel = self.preview_impedance_channel if channel is None else int(channel)
+        target_channel = int(np.clip(target_channel, 1, channel_count))
+        self.preview_mode = normalized
+        self.preview_impedance_channel = target_channel
+        if self.preview_widget is not None:
+            self.preview_widget.set_quality_mode(normalized, impedance_channel=target_channel)
+        self._set_preview_mode_label()
+        self._update_preview_status()
+
+    def _switch_preview_mode(
+        self,
+        mode: str,
+        *,
+        channel: int | None = None,
+        reset_default: bool = False,
+        show_error_dialog: bool = True,
+        write_log: bool = True,
+    ) -> bool:
+        normalized = (
+            RealtimeEEGPreviewWidget.MODE_IMPEDANCE
+            if str(mode).strip().upper().startswith("IMP")
+            else RealtimeEEGPreviewWidget.MODE_EEG
+        )
+        channel_count = self._preview_channel_count()
+        target_channel = self.preview_impedance_channel if channel is None else int(channel)
+        target_channel = int(np.clip(target_channel, 1, channel_count))
+
+        if self.worker is None or self.device_info is None:
+            self._apply_preview_mode_locally(normalized, channel=target_channel)
+            return False
+
+        ok, message = self.worker.switch_quality_mode_sync(
+            target_mode=normalized,
+            target_channel=target_channel,
+            reset_default=bool(reset_default),
+        )
+        if not ok:
+            if show_error_dialog:
+                self.show_error(message)
+            else:
+                self.log(message)
+            return False
+
+        self._apply_preview_mode_locally(normalized, channel=target_channel)
+        if write_log:
+            if normalized == RealtimeEEGPreviewWidget.MODE_IMPEDANCE:
+                self.log(f"质量检查模式 -> 阻抗模式（CH{target_channel}）")
+            elif bool(reset_default):
+                self.log("质量检查模式 -> EEG（已恢复默认设置）")
+            else:
+                self.log("质量检查模式 -> EEG")
+        return True
+
+    def on_preview_to_eeg_clicked(self) -> None:
+        self._switch_preview_mode(RealtimeEEGPreviewWidget.MODE_EEG, channel=self.preview_impedance_channel)
+        self.update_button_states()
+
+    def on_preview_to_imp_clicked(self) -> None:
+        self._switch_preview_mode(RealtimeEEGPreviewWidget.MODE_IMPEDANCE, channel=self.preview_impedance_channel)
+        self.update_button_states()
+
+    def on_preview_prev_channel_clicked(self) -> None:
+        channel_count = self._preview_channel_count()
+        self.preview_impedance_channel -= 1
+        if self.preview_impedance_channel < 1:
+            self.preview_impedance_channel = channel_count
+        if self.preview_mode == RealtimeEEGPreviewWidget.MODE_IMPEDANCE:
+            switched = self._switch_preview_mode(
+                RealtimeEEGPreviewWidget.MODE_IMPEDANCE,
+                channel=self.preview_impedance_channel,
+                write_log=False,
+            )
+            if switched:
+                self.log(f"阻抗检测通道 -> CH{self.preview_impedance_channel}")
+        else:
+            self._apply_preview_mode_locally(self.preview_mode, channel=self.preview_impedance_channel)
+        self.update_button_states()
+
+    def on_preview_next_channel_clicked(self) -> None:
+        channel_count = self._preview_channel_count()
+        self.preview_impedance_channel += 1
+        if self.preview_impedance_channel > channel_count:
+            self.preview_impedance_channel = 1
+        if self.preview_mode == RealtimeEEGPreviewWidget.MODE_IMPEDANCE:
+            switched = self._switch_preview_mode(
+                RealtimeEEGPreviewWidget.MODE_IMPEDANCE,
+                channel=self.preview_impedance_channel,
+                write_log=False,
+            )
+            if switched:
+                self.log(f"阻抗检测通道 -> CH{self.preview_impedance_channel}")
+        else:
+            self._apply_preview_mode_locally(self.preview_mode, channel=self.preview_impedance_channel)
+        self.update_button_states()
+
+    def on_preview_reset_clicked(self) -> None:
+        self._switch_preview_mode(
+            RealtimeEEGPreviewWidget.MODE_EEG,
+            channel=self.preview_impedance_channel,
+            reset_default=True,
+        )
+        self.update_button_states()
+
     def _update_preview_status(self) -> None:
         if self.preview_status_label is None:
             return
+
         suggested_seconds = 0.0 if not hasattr(self, "quality_check_spin") else float(self.quality_check_spin.value())
+        if self.preview_mode == RealtimeEEGPreviewWidget.MODE_IMPEDANCE:
+            mode_hint = f"当前模式：阻抗模式（CH{self.preview_impedance_channel}，原始波形，不滤波）。"
+        else:
+            mode_hint = "当前模式：EEG模式（仅用于可视化滤波；保存始终为原始数据）。"
+
         if self.device_info is None:
             self.preview_status_label.setText(
-                f"连接设备后开始刷新最近 5 秒原始 EEG；建议先观察约 {suggested_seconds:.0f} 秒，确认无掉线、坏道、饱和和异常漂移。"
+                f"连接设备后开始质量检查。{mode_hint} 建议先观察约 {suggested_seconds:.0f} 秒，确认无掉线、坏道、饱和和异常漂移。"
             )
+            self._set_preview_mode_label()
             return
+
         if self.current_phase == "quality_check":
             self.preview_status_label.setText(
-                "质量检查中：请观察原始波形，确认各通道稳定、无明显漂移，并检查接触质量。"
+                f"质量检查中：请观察波形稳定性并检查接触质量。{mode_hint}"
             )
+            self._set_preview_mode_label()
             return
+
         if self.session_running:
             self.preview_status_label.setText(
-                "实时面板持续显示原始 EEG（无滤波）；正式采集已经开始，该面板仅作为辅助监看。"
+                f"正式采集中：当前面板仅用于辅助监看。{mode_hint}"
             )
+            self._set_preview_mode_label()
             return
+
         self.preview_status_label.setText(
-            f"设备已连接：请先在当前界面观察原始波形约 {suggested_seconds:.0f} 秒，确认稳定后再点击“开始采集”进入受试者全屏。"
+            f"设备已连接：先完成连接后质量检查（约 {suggested_seconds:.0f} 秒）再开始采集。{mode_hint}"
         )
+        self._set_preview_mode_label()
 
     def _start_formal_protocol(self) -> None:
         self.record_event("calibration_start")
@@ -2251,8 +2639,20 @@ class MIDataCollectorWindow(QMainWindow):
         )
         self.summary_label.setText("状态：设备已准备好，请先检查原始波形稳定性")
         self.current_label.setText("当前任务：实验员测试 / 等待开始")
+        self.preview_mode = RealtimeEEGPreviewWidget.MODE_EEG
+        self.preview_impedance_channel = 1
         if self.preview_widget is not None:
             self.preview_widget.configure_stream(sampling_rate=sampling_rate, channel_names=channel_names)
+            self.preview_widget.set_quality_mode(self.preview_mode, impedance_channel=self.preview_impedance_channel)
+        if self.worker is not None and self.worker.supports_impedance_mode():
+            ok, message = self.worker.switch_quality_mode_sync(
+                target_mode=RealtimeEEGPreviewWidget.MODE_EEG,
+                target_channel=self.preview_impedance_channel,
+                reset_default=True,
+            )
+            if not ok:
+                self.log(message)
+        self._set_preview_mode_label()
         self._update_preview_status()
         self._update_trial_meta_labels()
         self.log("设备连接完成。")
@@ -2291,6 +2691,21 @@ class MIDataCollectorWindow(QMainWindow):
         )
         self.stop_button.setEnabled(self.session_running and self.worker_thread is not None and not self.waiting_for_save)
         self.disconnect_button.setEnabled(connected and not self.session_running and not self.waiting_for_save)
+
+        preview_controls_enabled = connected and not self.session_running and not self.waiting_for_save
+        supports_impedance = self.worker is not None and self.worker.supports_impedance_mode()
+        channel_step_enabled = preview_controls_enabled and supports_impedance and self._preview_channel_count() > 1
+        if self.preview_to_eeg_button is not None:
+            self.preview_to_eeg_button.setEnabled(preview_controls_enabled)
+        if self.preview_to_imp_button is not None:
+            self.preview_to_imp_button.setEnabled(preview_controls_enabled and supports_impedance)
+        if self.preview_prev_ch_button is not None:
+            self.preview_prev_ch_button.setEnabled(channel_step_enabled)
+        if self.preview_next_ch_button is not None:
+            self.preview_next_ch_button.setEnabled(channel_step_enabled)
+        if self.preview_reset_button is not None:
+            self.preview_reset_button.setEnabled(preview_controls_enabled and supports_impedance)
+        self._set_preview_mode_label()
 
         editable = self.worker_thread is None and not self.waiting_for_save
         self.set_config_enabled(editable)
@@ -2644,6 +3059,16 @@ class MIDataCollectorWindow(QMainWindow):
         if self.session_running or self.waiting_for_save:
             self.show_error("当前已有采集任务在运行或正在保存。")
             return
+        if self.worker.supports_impedance_mode():
+            switched = self._switch_preview_mode(
+                RealtimeEEGPreviewWidget.MODE_EEG,
+                channel=self.preview_impedance_channel,
+                reset_default=True,
+                show_error_dialog=True,
+                write_log=False,
+            )
+            if not switched:
+                return
 
         # Always use a fresh seed per session and persist it in settings/metadata.
         self.seed_spin.setValue(self._generate_session_seed())
@@ -3552,9 +3977,12 @@ class MIDataCollectorWindow(QMainWindow):
         self.continuous_prompt_plan = []
         self.continuous_prompt_index = -1
         self.current_continuous_prompt = None
+        self.preview_mode = RealtimeEEGPreviewWidget.MODE_EEG
+        self.preview_impedance_channel = 1
         self.device_label.setText("设备：未连接")
         if self.preview_widget is not None:
             self.preview_widget.clear_stream("设备断开后停止实时波形显示。")
+            self.preview_widget.set_quality_mode(self.preview_mode, impedance_channel=self.preview_impedance_channel)
         self._apply_phase_theme("idle", None)
         if marker_failure_active:
             self.summary_label.setText("状态：标记写入失败，本次会话已丢弃")
@@ -3569,6 +3997,7 @@ class MIDataCollectorWindow(QMainWindow):
             self.summary_label.setText("状态：设备已断开")
         self.marker_failure_active = False
         self.marker_failure_message = ""
+        self._set_preview_mode_label()
         self._update_preview_status()
         self.update_button_states()
         if pending_save_result:

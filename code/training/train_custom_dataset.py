@@ -32,10 +32,10 @@ from src.realtime_mi import build_realtime_artifact_bank
 
 
 MI_CLASSES = [
-    {"key": "left_hand", "display_name": "左手想象"},
-    {"key": "right_hand", "display_name": "右手想象"},
-    {"key": "feet", "display_name": "双脚想象"},
-    {"key": "tongue", "display_name": "舌头想象"},
+    {"key": "left_hand", "display_name": "\u5de6\u624b\u60f3\u8c61"},
+    {"key": "right_hand", "display_name": "\u53f3\u624b\u60f3\u8c61"},
+    {"key": "feet", "display_name": "\u53cc\u811a\u60f3\u8c61"},
+    {"key": "tongue", "display_name": "\u820c\u5934\u60f3\u8c61"},
 ]
 CLASS_NAME_TO_DISPLAY = {item["key"]: item["display_name"] for item in MI_CLASSES}
 GATE_CLASS_NAMES = ["rest", "control"]
@@ -53,6 +53,9 @@ DEFAULT_FUSION_WEIGHT_GRID_STEP = 0.05
 DEFAULT_EPOCH_LENGTH_TOLERANCE_SAMPLES = 8
 DEFAULT_REST_WINDOW_STEP_SEC = 0.5
 DEFAULT_REST_FALSE_ACTIVATION_TARGET = 0.10
+DEFAULT_MIN_GATE_CONTROL_DETECTION_RATE = 0.05
+DEFAULT_MIN_ARTIFACT_DETECTION_RATE = 0.05
+DEFAULT_MIN_BINARY_STAGE_CLASS_ACCURACY = 0.05
 DEFAULT_RECOMMENDED_TOTAL_CLASS_TRIALS = 30
 DEFAULT_RECOMMENDED_RUN_CLASS_TRIALS = 8
 DEFAULT_MAIN_CANDIDATE_NAMES = [
@@ -205,7 +208,7 @@ def default_artifact_candidate_names(candidate_names: list[str] | None = None) -
 def find_epoch_files(dataset_root: Path, subject_filter: str | None) -> list[Path]:
     """Find all saved epoch npz files (new + legacy names)."""
     if not dataset_root.exists():
-        raise FileNotFoundError(f"数据集目录不存在：{dataset_root}")
+        raise FileNotFoundError(f"Dataset root does not exist: {dataset_root}")
 
     candidates: list[Path] = []
     seen: set[Path] = set()
@@ -230,7 +233,7 @@ def find_epoch_files(dataset_root: Path, subject_filter: str | None) -> list[Pat
             )
         ]
     if not epoch_files:
-        raise FileNotFoundError(f"没有找到可训练的 *_epochs.npz / epochs.npz：{dataset_root}")
+        raise FileNotFoundError(f"No trainable *_epochs.npz / epochs.npz files found under: {dataset_root}")
     return epoch_files
 
 
@@ -317,7 +320,7 @@ def load_custom_epochs(dataset_root: Path, subject_filter: str | None = None) ->
                 else np.arange(X_iti.shape[0], dtype=np.int64)
             )
 
-        if signal_unit in {"uv", "microvolt", "microvolts", "µv", "μv"}:
+        if signal_unit in {"uv", "microvolt", "microvolts", "\u00b5v", "\u03bcv"}:
             X = (X * 1e-6).astype(np.float32)
             X_baseline = (X_baseline * 1e-6).astype(np.float32)
             X_iti = (X_iti * 1e-6).astype(np.float32)
@@ -360,17 +363,17 @@ def load_custom_epochs(dataset_root: Path, subject_filter: str | None = None) ->
         if channel_names is None:
             channel_names = current_channel_names
         elif current_channel_names != channel_names:
-            raise ValueError(f"通道名称不一致：{path}")
+            raise ValueError(f"Channel names are inconsistent: {path}")
 
         if class_names is None:
             class_names = current_class_names
         elif current_class_names != class_names:
-            raise ValueError(f"类别名称不一致：{path}")
+            raise ValueError(f"Class names are inconsistent: {path}")
 
         if sampling_rate is None:
             sampling_rate = current_sampling_rate
         elif abs(current_sampling_rate - sampling_rate) > 1e-6:
-            raise ValueError(f"采样率不一致：{path}")
+            raise ValueError(f"Sampling rate is inconsistent: {path}")
 
         source_records.append(file_record)
         group_token = run_stem
@@ -463,7 +466,9 @@ def load_custom_epochs(dataset_root: Path, subject_filter: str | None = None) ->
         dropped_short_runs = []
 
     if not all_X:
-        raise RuntimeError("没有可用的有效 trial。请先完成采集，并且不要全部标记为坏试次。")
+        raise RuntimeError(
+            "No usable valid trials were found. Please collect data first and avoid marking all trials as bad."
+        )
 
     X_merged = np.concatenate([array[:, :, :min_samples] for array in all_X], axis=0)
     y_merged = np.concatenate(all_y, axis=0)
@@ -503,7 +508,7 @@ def _infer_npz_task_and_run_stem(path: Path) -> tuple[str | None, str]:
 def find_run_npz_files(dataset_root: Path, subject_filter: str | None) -> list[dict[str, object]]:
     """Discover per-run npz files and group them by run stem."""
     if not dataset_root.exists():
-        raise FileNotFoundError(f"数据集目录不存在：{dataset_root}")
+        raise FileNotFoundError(f"Dataset root does not exist: {dataset_root}")
 
     grouped: dict[str, dict[str, object]] = {}
     for path in dataset_root.rglob("*.npz"):
@@ -528,8 +533,9 @@ def find_run_npz_files(dataset_root: Path, subject_filter: str | None) -> list[d
     runs = [grouped[key] for key in sorted(grouped.keys())]
     if not runs:
         raise FileNotFoundError(
-            "没有找到可训练数据。需要至少一种：*_mi_epochs.npz / *_gate_epochs.npz / "
-            "*_artifact_epochs.npz / *_continuous.npz（或 legacy *_epochs.npz）"
+            "No trainable data files were found. Expected at least one of: "
+            "*_mi_epochs.npz / *_gate_epochs.npz / *_artifact_epochs.npz / *_continuous.npz "
+            "(or legacy *_epochs.npz)."
         )
     return runs
 
@@ -555,17 +561,17 @@ def _ensure_common_metadata(
     if channel_names is None:
         channel_names = list(current_channel_names)
     elif list(current_channel_names) != list(channel_names):
-        raise ValueError(f"通道名称不一致：{path}")
+        raise ValueError(f"Channel names are inconsistent: {path}")
 
     if class_names is None:
         class_names = list(current_class_names)
     elif list(current_class_names) != list(class_names):
-        raise ValueError(f"类别名称不一致：{path}")
+        raise ValueError(f"Class names are inconsistent: {path}")
 
     if sampling_rate is None:
         sampling_rate = float(current_sampling_rate)
     elif abs(float(current_sampling_rate) - float(sampling_rate)) > 1e-6:
-        raise ValueError(f"采样率不一致：{path}")
+        raise ValueError(f"Sampling rate is inconsistent: {path}")
 
     return channel_names, class_names, float(sampling_rate)
 
@@ -573,7 +579,7 @@ def _ensure_common_metadata(
 def _convert_signal_unit_to_volt(X: np.ndarray, signal_unit: str) -> np.ndarray:
     """Convert supported EEG units into volts."""
     unit = str(signal_unit).strip().lower()
-    if unit in {"uv", "microvolt", "microvolts", "µv", "μv"}:
+    if unit in {"uv", "microvolt", "microvolts", "\u00b5v", "\u03bcv"}:
         return np.asarray(X, dtype=np.float32) * 1e-6
     return np.asarray(X, dtype=np.float32)
 
@@ -616,6 +622,33 @@ def _exclude_continuous_sourced_segments(
     )
 
 
+def _keep_readable_npz(path: Path | None, *, label: str, run_issues: list[str]) -> Path | None:
+    """Keep only readable/non-empty npz paths and record issues for dropped files."""
+    if path is None:
+        return None
+    candidate = Path(path)
+    if not candidate.exists():
+        run_issues.append(f"{label}:missing")
+        return None
+    if not candidate.is_file():
+        run_issues.append(f"{label}:not_file")
+        return None
+    try:
+        if int(candidate.stat().st_size) <= 0:
+            run_issues.append(f"{label}:empty")
+            return None
+    except OSError as error:
+        run_issues.append(f"{label}:stat_error:{type(error).__name__}")
+        return None
+    try:
+        with np.load(candidate, allow_pickle=True) as data:
+            _ = tuple(data.files)
+    except Exception as error:
+        run_issues.append(f"{label}:load_error:{type(error).__name__}")
+        return None
+    return candidate
+
+
 def load_custom_task_datasets(dataset_root: Path, subject_filter: str | None = None) -> dict[str, object]:
     """Load MI / gate / artifact / continuous datasets by task-specific npz files."""
     run_entries = find_run_npz_files(dataset_root, subject_filter)
@@ -637,7 +670,28 @@ def load_custom_task_datasets(dataset_root: Path, subject_filter: str | None = N
         gate_path = Path(paths["gate"]) if "gate" in paths else None
         artifact_path = Path(paths["artifact"]) if "artifact" in paths else None
         continuous_path = Path(paths["continuous"]) if "continuous" in paths else None
+        run_issues: list[str] = []
+        mi_path = _keep_readable_npz(mi_path, label="mi", run_issues=run_issues)
+        gate_path = _keep_readable_npz(gate_path, label="gate", run_issues=run_issues)
+        artifact_path = _keep_readable_npz(artifact_path, label="artifact", run_issues=run_issues)
+        continuous_path = _keep_readable_npz(continuous_path, label="continuous", run_issues=run_issues)
         probe_path = mi_path or gate_path or artifact_path or continuous_path
+        if probe_path is None:
+            fallback_probe = next(
+                (
+                    Path(item)
+                    for item in (
+                        paths.get("mi"),
+                        paths.get("legacy"),
+                        paths.get("gate"),
+                        paths.get("artifact"),
+                        paths.get("continuous"),
+                    )
+                    if item
+                ),
+                None,
+            )
+            probe_path = fallback_probe
         if probe_path is None:
             continue
 
@@ -666,6 +720,8 @@ def load_custom_task_datasets(dataset_root: Path, subject_filter: str | None = N
             "continuous_prompts": 0,
             "dropped_reason": "",
         }
+        if run_issues:
+            file_record["dropped_reason"] = "|".join(run_issues)
 
         mi_X = np.empty((0, 0, 0), dtype=np.float32)
         mi_y = np.empty((0,), dtype=np.int64)
@@ -909,6 +965,8 @@ def load_custom_task_datasets(dataset_root: Path, subject_filter: str | None = N
         file_record["subject_id"] = subject_id
         file_record["session_id"] = session_token
         file_record["run_index"] = run_index
+        if run_issues:
+            file_record["dropped_reason"] = "|".join(run_issues)
 
         if mi_X.ndim == 3 and mi_X.shape[0] > 0:
             class_count_lookup = Counter(int(label) for label in np.asarray(mi_y, dtype=np.int64).tolist())
@@ -932,6 +990,8 @@ def load_custom_task_datasets(dataset_root: Path, subject_filter: str | None = N
                 }
             )
             file_record["mi_trials"] = int(mi_X.shape[0])
+        elif not str(file_record.get("dropped_reason", "")).strip():
+            file_record["dropped_reason"] = "missing_or_invalid_mi_epochs"
 
         if gate_pos.ndim == 3 and gate_pos.shape[0] > 0:
             gate_payloads.append(
@@ -962,9 +1022,19 @@ def load_custom_task_datasets(dataset_root: Path, subject_filter: str | None = N
         source_records.append(file_record)
 
     if not mi_payloads:
-        raise RuntimeError("没有可用的 MI 训练样本。请确认存在 *_mi_epochs.npz（或 legacy *_epochs.npz）。")
+        dropped_details = [
+            f"{str(item.get('run_stem', 'unknown'))}:{str(item.get('dropped_reason', 'unknown'))}"
+            for item in source_records
+            if str(item.get("dropped_reason", "")).strip()
+        ]
+        detail_message = f" Dropped runs: {dropped_details[:8]}" if dropped_details else ""
+        raise RuntimeError(
+            "No usable MI training samples were found. "
+            "Expected at least one valid *_mi_epochs.npz (or legacy *_epochs.npz)."
+            + detail_message
+        )
     if channel_names is None or class_names is None or sampling_rate is None:
-        raise RuntimeError("训练数据元信息不完整：缺少 channel_names/class_names/sampling_rate。")
+        raise RuntimeError("Training metadata is incomplete: missing channel_names/class_names/sampling_rate.")
 
     sample_counts = [int(item["sample_count"]) for item in mi_payloads]
     length_histogram = Counter(sample_counts)
@@ -979,7 +1049,9 @@ def load_custom_task_datasets(dataset_root: Path, subject_filter: str | None = N
             continue
         retained_payloads.append(payload)
     if not retained_payloads:
-        raise RuntimeError("所有 MI run 的 epoch 长度都不满足共同窗口约束，无法训练。")
+        raise RuntimeError(
+            "All MI runs are too short for the common epoch-length constraint, so training cannot continue."
+        )
 
     target_mi_samples = int(min(int(item["sample_count"]) for item in retained_payloads))
     X_mi = np.concatenate(
@@ -1222,13 +1294,13 @@ def validate_dataset_distribution(
     missing = [index for index in range(len(class_names)) if counts.get(index, 0) == 0]
     if missing:
         missing_names = [class_names[index] for index in missing]
-        raise RuntimeError(f"类别不完整，缺失类别：{missing_names}")
+        raise RuntimeError(f"Incomplete classes: missing {missing_names}")
 
     too_few = {index: count for index, count in counts.items() if count < int(min_class_trials)}
     if too_few:
         details = {class_names[index]: int(count) for index, count in sorted(too_few.items())}
         raise RuntimeError(
-            f"每个类别至少需要 {int(min_class_trials)} 个有效 trial 才能稳定分层训练，当前不足：{details}"
+            f"Each class needs at least {int(min_class_trials)} valid trials for stable stratified training; current counts: {details}"
         )
 
     return {class_names[index]: int(count) for index, count in sorted(counts.items())}
@@ -3900,18 +3972,59 @@ def train_custom_model(
         gate_bank_artifact["candidate_names"] = list(selected_gate_candidate_names)
         gate_bank_artifact["window_offset_secs"] = [float(item) for item in selected_offset_secs]
         gate_bank_artifact["split_strategy"] = gate_split_strategy
-        gate_summary = {
-            "enabled": True,
-            "candidate_names": list(selected_gate_candidate_names),
-            "fusion_weights": list(gate_bank_artifact["fusion_weights"]),
-            "fusion_method": fusion_method,
-            "probability_calibration": dict(gate_bank_probability_calibration),
-            "recommended_runtime": gate_runtime,
-            "metrics": gate_bank_artifact["metrics"],
-            "member_models": gate_member_summaries,
-            "split_strategy": gate_split_strategy,
+        gate_calibration = dict(gate_runtime.get("calibration") or {})
+        gate_per_class_test_acc = {
+            str(name): float(value)
+            for name, value in dict(gate_bank_artifact["metrics"].get("bank_per_class_test_acc", {})).items()
         }
-        bank_artifact["control_gate"] = gate_bank_artifact
+        gate_control_acc = float(gate_per_class_test_acc.get("control", 0.0))
+        gate_rest_acc = float(gate_per_class_test_acc.get("rest", 0.0))
+        gate_control_detection = float(gate_calibration.get("control_detection_rate", 0.0))
+        gate_selection_feasible = bool(gate_calibration.get("selection_feasible", True))
+        gate_auto_disable_reasons: list[str] = []
+        if not gate_selection_feasible:
+            gate_auto_disable_reasons.append("threshold_selection_not_feasible")
+        if gate_control_detection < float(DEFAULT_MIN_GATE_CONTROL_DETECTION_RATE):
+            gate_auto_disable_reasons.append(
+                f"control_detection_too_low:{gate_control_detection:.3f}<"
+                f"{float(DEFAULT_MIN_GATE_CONTROL_DETECTION_RATE):.3f}"
+            )
+        if gate_control_acc < float(DEFAULT_MIN_BINARY_STAGE_CLASS_ACCURACY):
+            gate_auto_disable_reasons.append(
+                f"control_class_acc_too_low:{gate_control_acc:.3f}<"
+                f"{float(DEFAULT_MIN_BINARY_STAGE_CLASS_ACCURACY):.3f}"
+            )
+        if gate_rest_acc < float(DEFAULT_MIN_BINARY_STAGE_CLASS_ACCURACY):
+            gate_auto_disable_reasons.append(
+                f"rest_class_acc_too_low:{gate_rest_acc:.3f}<"
+                f"{float(DEFAULT_MIN_BINARY_STAGE_CLASS_ACCURACY):.3f}"
+            )
+
+        if gate_auto_disable_reasons:
+            gate_summary = {
+                "enabled": False,
+                "candidate_names": list(selected_gate_candidate_names),
+                "available_member_count": int(len(gate_member_artifacts)),
+                "split_strategy": gate_split_strategy,
+                "auto_disabled": True,
+                "auto_disable_reasons": gate_auto_disable_reasons,
+                "metrics": gate_bank_artifact["metrics"],
+                "recommended_runtime": gate_runtime,
+            }
+            bank_artifact["control_gate"] = None
+        else:
+            gate_summary = {
+                "enabled": True,
+                "candidate_names": list(selected_gate_candidate_names),
+                "fusion_weights": list(gate_bank_artifact["fusion_weights"]),
+                "fusion_method": fusion_method,
+                "probability_calibration": dict(gate_bank_probability_calibration),
+                "recommended_runtime": gate_runtime,
+                "metrics": gate_bank_artifact["metrics"],
+                "member_models": gate_member_summaries,
+                "split_strategy": gate_split_strategy,
+            }
+            bank_artifact["control_gate"] = gate_bank_artifact
     else:
         bank_artifact["control_gate"] = None
 
@@ -4064,19 +4177,61 @@ def train_custom_model(
         artifact_bank_artifact["candidate_names"] = list(selected_artifact_candidate_names)
         artifact_bank_artifact["window_offset_secs"] = [0.0]
         artifact_bank_artifact["split_strategy"] = artifact_split_strategy
-        artifact_rejector_summary = {
-            "enabled": True,
-            "candidate_names": list(selected_artifact_candidate_names),
-            "class_names": list(ARTIFACT_REJECTOR_CLASS_NAMES),
-            "fusion_weights": list(artifact_bank_artifact["fusion_weights"]),
-            "fusion_method": fusion_method,
-            "probability_calibration": dict(artifact_bank_probability_calibration),
-            "recommended_runtime": artifact_runtime,
-            "metrics": artifact_bank_artifact["metrics"],
-            "member_models": artifact_member_summaries,
-            "split_strategy": artifact_split_strategy,
+        artifact_calibration = dict(artifact_runtime.get("calibration") or {})
+        artifact_per_class_test_acc = {
+            str(name): float(value)
+            for name, value in dict(artifact_bank_artifact["metrics"].get("bank_per_class_test_acc", {})).items()
         }
-        bank_artifact["artifact_rejector"] = artifact_bank_artifact
+        artifact_detection = float(artifact_calibration.get("control_detection_rate", 0.0))
+        clean_acc = float(artifact_per_class_test_acc.get("clean", 0.0))
+        artifact_acc = float(artifact_per_class_test_acc.get("artifact", 0.0))
+        artifact_selection_feasible = bool(artifact_calibration.get("selection_feasible", True))
+        artifact_auto_disable_reasons: list[str] = []
+        if not artifact_selection_feasible:
+            artifact_auto_disable_reasons.append("threshold_selection_not_feasible")
+        if artifact_detection < float(DEFAULT_MIN_ARTIFACT_DETECTION_RATE):
+            artifact_auto_disable_reasons.append(
+                f"artifact_detection_too_low:{artifact_detection:.3f}<"
+                f"{float(DEFAULT_MIN_ARTIFACT_DETECTION_RATE):.3f}"
+            )
+        if clean_acc < float(DEFAULT_MIN_BINARY_STAGE_CLASS_ACCURACY):
+            artifact_auto_disable_reasons.append(
+                f"clean_class_acc_too_low:{clean_acc:.3f}<"
+                f"{float(DEFAULT_MIN_BINARY_STAGE_CLASS_ACCURACY):.3f}"
+            )
+        if artifact_acc < float(DEFAULT_MIN_BINARY_STAGE_CLASS_ACCURACY):
+            artifact_auto_disable_reasons.append(
+                f"artifact_class_acc_too_low:{artifact_acc:.3f}<"
+                f"{float(DEFAULT_MIN_BINARY_STAGE_CLASS_ACCURACY):.3f}"
+            )
+
+        if artifact_auto_disable_reasons:
+            artifact_rejector_summary = {
+                "enabled": False,
+                "candidate_names": list(selected_artifact_candidate_names),
+                "class_names": list(ARTIFACT_REJECTOR_CLASS_NAMES),
+                "available_member_count": int(len(artifact_member_artifacts)),
+                "split_strategy": artifact_split_strategy,
+                "auto_disabled": True,
+                "auto_disable_reasons": artifact_auto_disable_reasons,
+                "metrics": artifact_bank_artifact["metrics"],
+                "recommended_runtime": artifact_runtime,
+            }
+            bank_artifact["artifact_rejector"] = None
+        else:
+            artifact_rejector_summary = {
+                "enabled": True,
+                "candidate_names": list(selected_artifact_candidate_names),
+                "class_names": list(ARTIFACT_REJECTOR_CLASS_NAMES),
+                "fusion_weights": list(artifact_bank_artifact["fusion_weights"]),
+                "fusion_method": fusion_method,
+                "probability_calibration": dict(artifact_bank_probability_calibration),
+                "recommended_runtime": artifact_runtime,
+                "metrics": artifact_bank_artifact["metrics"],
+                "member_models": artifact_member_summaries,
+                "split_strategy": artifact_split_strategy,
+            }
+            bank_artifact["artifact_rejector"] = artifact_bank_artifact
     else:
         bank_artifact["artifact_rejector"] = None
 
@@ -4329,13 +4484,13 @@ def train_custom_model(
 
 def build_parser() -> argparse.ArgumentParser:
     """Build the CLI parser."""
-    parser = argparse.ArgumentParser(description="用自采运动想象数据训练判别模型")
-    parser.add_argument("--dataset-root", type=Path, default=DEFAULT_DATASET_ROOT, help="自采数据集根目录")
-    parser.add_argument("--subject", type=str, default="", help="只训练某一位被试，例如 001 或 sub-001")
-    parser.add_argument("--output-model", type=Path, default=DEFAULT_MODEL_PATH, help="输出模型路径")
-    parser.add_argument("--report-path", type=Path, default=DEFAULT_REPORT_PATH, help="输出训练摘要路径")
-    parser.add_argument("--random-state", type=int, default=42, help="随机种子")
-    parser.add_argument("--min-class-trials", type=int, default=5, help="每个类别最少有效 trial 数")
+    parser = argparse.ArgumentParser(description="Train MI classifier from custom collected datasets.")
+    parser.add_argument("--dataset-root", type=Path, default=DEFAULT_DATASET_ROOT, help="Root directory of custom dataset files.")
+    parser.add_argument("--subject", type=str, default="", help="Optional subject filter, e.g. 001 or sub-001.")
+    parser.add_argument("--output-model", type=Path, default=DEFAULT_MODEL_PATH, help="Output realtime model artifact path.")
+    parser.add_argument("--report-path", type=Path, default=DEFAULT_REPORT_PATH, help="Output training summary JSON path.")
+    parser.add_argument("--random-state", type=int, default=42, help="Random seed.")
+    parser.add_argument("--min-class-trials", type=int, default=5, help="Minimum accepted MI trials per class.")
     parser.add_argument(
         "--recommended-total-class-trials",
         type=int,
@@ -4357,32 +4512,32 @@ def build_parser() -> argparse.ArgumentParser:
         "--window-secs",
         type=str,
         default=",".join(str(item) for item in DEFAULT_WINDOW_SECS),
-        help="训练并导出的窗长列表，例如 2.0,2.5,3.0",
+        help="Candidate training/inference window lengths in seconds, e.g. 2.0,2.5,3.0.",
     )
     parser.add_argument(
         "--window-offset-sec",
         type=float,
         default=None,
-        help="已兼容保留：只使用单个 offset 时，从 imagery 起点向后偏移多少秒再开始裁窗",
+        help="Deprecated compatibility option for one offset from imagery onset (seconds).",
     )
     parser.add_argument(
         "--window-offset-secs",
         type=str,
         default="",
-        help="候选 offset 列表，例如 0.25,0.5,0.75；默认会自动搜索推荐的多个 offset",
+        help="Candidate window offsets in seconds, e.g. 0.25,0.5,0.75.",
     )
     parser.add_argument(
         "--fusion-method",
         type=str,
         default=DEFAULT_FUSION_METHOD,
         choices=["weighted_mean", "log_weighted_mean"],
-        help="多窗口融合方法",
+        help="Fusion method used across member windows.",
     )
     parser.add_argument(
         "--fusion-weights",
         type=str,
         default="",
-        help="可选，多窗口融合权重，例如 0.45,0.35,0.20",
+        help="Optional fusion weights, e.g. 0.45,0.35,0.20.",
     )
     parser.add_argument(
         "--candidate-names",
@@ -4593,3 +4748,4 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
