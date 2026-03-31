@@ -2,6 +2,8 @@
 
 训练入口会从 `datasets/custom_mi` 读取采集结果，产出实时可加载工件。
 
+配套规范文档：`README_DATA_LOADING.md`、`README_DATA_ADMISSION.md`。
+
 ## 1. 入口
 
 推荐（项目根目录）：
@@ -51,6 +53,7 @@ python code/training/train_custom_dataset.py
 
 - `channel_names`、`class_names`、`sampling_rate` 跨文件必须一致
 - `accepted=0` 的 trial 会自动过滤
+- 推荐把 `*_raw.fif / *_events.csv / *_trials.csv` 当作真源保留；`*_npz` 是训练派生缓存
 
 ## 4. 训练任务拆分
 
@@ -58,6 +61,7 @@ python code/training/train_custom_dataset.py
 - `control_gate`：control vs no-control
 - `artifact_rejector`：clean vs artifact
 - continuous：online-like 离线评估
+- gate 负类中来自 `continuous_*` 的片段会在训练前自动剔除，避免评估泄漏
 
 ## 5. 默认关键参数
 
@@ -70,6 +74,13 @@ python code/training/train_custom_dataset.py
 
 - 采集 `imagery_sec` 需要满足：`>= max(window_secs)+max(window_offset_secs)`
 - 默认至少 `3.75s`，建议采集时用 `4.0s` 以上
+
+训练准入建议（默认只告警，不强制）：
+
+- 每类累计 accepted trial 建议 `>=30`
+- 单个 run 内每类 accepted trial 建议 `>=8`
+- 可通过 `--enforce-readiness` 改为不达标即报错
+- 可通过 `--recommended-total-class-trials` / `--recommended-run-class-trials` 调整阈值
 
 ## 6. 候选模型
 
@@ -119,6 +130,15 @@ python code/training/train_custom_dataset.py `
   --artifact-candidate-names full8_fblight
 ```
 
+启用严格准入：
+
+```powershell
+python code/training/train_custom_dataset.py `
+  --enforce-readiness `
+  --recommended-total-class-trials 30 `
+  --recommended-run-class-trials 8
+```
+
 ## 8. 训练结果中值得重点看
 
 命令行会打印：
@@ -130,5 +150,6 @@ python code/training/train_custom_dataset.py `
 - `recommended_gate_thresholds`
 - `recommended_artifact_thresholds`
 - `continuous_online_like`（evaluated、mi_acc、no_control_fa）
+- `dataset_readiness_ready / dataset_readiness_warnings`
 
 建议先确认 gate/rejector 是否可用，再做实时测试。

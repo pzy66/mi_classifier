@@ -23,6 +23,12 @@
 - 新结构：`sub-<id>/ses-<id>/...`
 - 旧结构：`ses-<id>/...`
 
+建议的数据分层：
+
+- 真源层：`*_raw.fif / *_events.csv / *_trials.csv / *_session_meta.json / *_quality_report.json`
+- 训练层：`*_mi_epochs.npz / *_gate_epochs.npz / *_artifact_epochs.npz`
+- 在线验证层：`*_continuous.npz`
+
 ## 3. 统一检查（不通过会报错）
 
 跨文件必须一致：
@@ -44,6 +50,7 @@
 - gate 负类来自 baseline/iti/idle/prepare 等片段
 - continuous 来源的 gate 负类会在训练阶段做防泄漏处理（避免评估污染）
 - `X_gate_hard_neg` 可为空，流程会自动兼容
+- 每个 run 的剔除数量会记录在 `source_records[*].gate_neg_dropped_continuous`
 
 ## 6. continuous 数据用途
 
@@ -62,6 +69,7 @@ continuous 仅用于 online-like 评估，输出指标例如：
 - 文件相对路径
 - subject/session/run 信息（可解析时）
 - 各任务片段数量（mi/gate/artifact/continuous）
+- 每个 run 的 MI 类别计数（`mi_class_counts`）
 - dropped 统计（如 gate continuous-source negatives）
 
 出现“训练样本数量异常”时，先看这里。
@@ -73,3 +81,17 @@ continuous 仅用于 online-like 评估，输出指标例如：
 - 若要启用 gate/artifact，对应任务样本需满足基本二分类切分
 
 不满足时会降级为仅主分类或直接报错。
+
+## 9. 训练准入（建议阈值）
+
+训练摘要会输出 `dataset_readiness`：
+
+- `total_class_counts`：所有已纳入 run 的每类 accepted trial 总数
+- `run_checks`：每个 run 的 `mi_class_counts` 与最小类计数
+- `warnings`：未达到建议阈值时的告警
+
+相关参数：
+
+- `--recommended-total-class-trials`（默认 30）
+- `--recommended-run-class-trials`（默认 8）
+- `--enforce-readiness`（开启后，不达标直接报错）

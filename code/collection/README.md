@@ -68,6 +68,7 @@ python code/collection/mi_data_collector.py --subject-id 001 --session-id 202603
 - run 休息 `90s`，每 2 个 run 长休 `180s`
 - `quality_check_sec=45s` 仅作开始前人工观察参考，不写入正式事件流
 - `continuous = 2 x 150s`，默认插在完成 MI run 2 和 run 4 后
+- `include_eyes_closed_rest_in_gate_neg=False`（默认不把闭眼静息并入 gate 负类）
 
 continuous 参数约束：
 
@@ -132,6 +133,8 @@ continuous 参数约束：
 并更新：
 
 - `datasets/custom_mi/collection_manifest.csv`
+
+建议将 `*_raw.fif / *_events.csv / *_trials.csv` 作为真源长期保留，后续窗口和标签规则变化时以此重切 `*_npz`。
 
 文件命名规则见：`README_SAVE_NAMING.md`。
 

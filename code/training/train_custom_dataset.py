@@ -53,6 +53,8 @@ DEFAULT_FUSION_WEIGHT_GRID_STEP = 0.05
 DEFAULT_EPOCH_LENGTH_TOLERANCE_SAMPLES = 8
 DEFAULT_REST_WINDOW_STEP_SEC = 0.5
 DEFAULT_REST_FALSE_ACTIVATION_TARGET = 0.10
+DEFAULT_RECOMMENDED_TOTAL_CLASS_TRIALS = 30
+DEFAULT_RECOMMENDED_RUN_CLASS_TRIALS = 8
 DEFAULT_MAIN_CANDIDATE_NAMES = [
     "central_fbcsp_lda",
     "central_prior_dual_branch_fblight_tcn",
@@ -594,20 +596,24 @@ def _stack_task_segments(
 def _exclude_continuous_sourced_segments(
     X: np.ndarray,
     sources: np.ndarray,
-) -> tuple[np.ndarray, int]:
+) -> tuple[np.ndarray, np.ndarray, int]:
     """Drop gate negatives that were extracted from continuous blocks to avoid evaluation leakage."""
     X = np.asarray(X, dtype=np.float32)
     sources = np.asarray(sources, dtype=object)
     if X.ndim != 3 or X.shape[0] == 0:
-        return X, 0
+        return X, sources, 0
     if sources.shape[0] != X.shape[0]:
-        return X, 0
+        return X, sources, 0
     keep_mask = np.asarray(
         [not _decode_npz_text(item).strip().lower().startswith("continuous") for item in sources.tolist()],
         dtype=bool,
     )
     dropped = int(np.sum(~keep_mask))
-    return np.asarray(X[keep_mask], dtype=np.float32), dropped
+    return (
+        np.asarray(X[keep_mask], dtype=np.float32),
+        np.asarray(sources[keep_mask], dtype=object),
+        dropped,
+    )
 
 
 def load_custom_task_datasets(dataset_root: Path, subject_filter: str | None = None) -> dict[str, object]:
@@ -650,6 +656,7 @@ def load_custom_task_datasets(dataset_root: Path, subject_filter: str | None = N
             "artifact_file": "" if artifact_path is None else str(artifact_path.relative_to(dataset_root)),
             "continuous_file": "" if continuous_path is None else str(continuous_path.relative_to(dataset_root)),
             "mi_trials": 0,
+            "mi_class_counts": {},
             "gate_pos_segments": 0,
             "gate_neg_segments": 0,
             "gate_hard_neg_segments": 0,
@@ -786,6 +793,13 @@ def load_custom_task_datasets(dataset_root: Path, subject_filter: str | None = N
             gate_neg_sources = np.asarray(["legacy_rest"] * gate_neg.shape[0], dtype=object)
             gate_hard_neg_sources = np.asarray([], dtype=object)
 
+        if gate_neg.ndim == 3 and gate_neg.shape[0] > 0:
+            gate_neg, gate_neg_sources, dropped_continuous = _exclude_continuous_sourced_segments(
+                gate_neg,
+                gate_neg_sources,
+            )
+            file_record["gate_neg_dropped_continuous"] = int(dropped_continuous)
+
         if artifact_path is not None:
             with np.load(artifact_path, allow_pickle=True) as data:
                 signal_unit = _load_npz_text(data, "signal_unit", "volt")
@@ -897,6 +911,11 @@ def load_custom_task_datasets(dataset_root: Path, subject_filter: str | None = N
         file_record["run_index"] = run_index
 
         if mi_X.ndim == 3 and mi_X.shape[0] > 0:
+            class_count_lookup = Counter(int(label) for label in np.asarray(mi_y, dtype=np.int64).tolist())
+            file_record["mi_class_counts"] = {
+                str(class_name): int(class_count_lookup.get(index, 0))
+                for index, class_name in enumerate(class_names or [])
+            }
             mi_payloads.append(
                 {
                     "relative_path": "" if mi_path is None else str(mi_path.relative_to(dataset_root)),
@@ -1213,6 +1232,83 @@ def validate_dataset_distribution(
         )
 
     return {class_names[index]: int(count) for index, count in sorted(counts.items())}
+
+
+def evaluate_dataset_readiness(
+    *,
+    label_distribution: dict[str, int],
+    source_records: list[dict[str, object]],
+    class_names: list[str],
+    recommended_total_class_trials: int,
+    recommended_run_class_trials: int,
+) -> dict[str, object]:
+    """Build readiness diagnostics so dataset quality checks are explicit and reproducible."""
+    total_min = max(0, int(recommended_total_class_trials))
+    run_min = max(0, int(recommended_run_class_trials))
+
+    total_counts = {str(name): int(label_distribution.get(str(name), 0)) for name in class_names}
+    classes_below_total = (
+        {str(name): int(count) for name, count in total_counts.items() if int(count) < total_min}
+        if total_min > 0
+        else {}
+    )
+
+    run_checks: list[dict[str, object]] = []
+    runs_below_min: list[dict[str, object]] = []
+    for raw_record in source_records:
+        if not isinstance(raw_record, dict):
+            continue
+        class_counts_raw = raw_record.get("mi_class_counts")
+        if not isinstance(class_counts_raw, dict) or not class_counts_raw:
+            continue
+
+        class_counts = {
+            str(name): int(class_counts_raw.get(str(name), 0))
+            for name in class_names
+        }
+        min_count = int(min(class_counts.values())) if class_counts else 0
+        run_summary = {
+            "run_stem": str(raw_record.get("run_stem", "")),
+            "session_id": str(raw_record.get("session_id", "")),
+            "mi_class_counts": class_counts,
+            "min_class_trials": int(min_count),
+            "meets_recommended_min": bool(min_count >= run_min) if run_min > 0 else True,
+        }
+        run_checks.append(run_summary)
+        if run_min > 0 and min_count < run_min:
+            runs_below_min.append(run_summary)
+
+    warnings: list[str] = []
+    if classes_below_total:
+        warnings.append(
+            "per-class totals below recommended minimum "
+            f"({total_min}): {classes_below_total}"
+        )
+    if runs_below_min:
+        warnings.append(
+            "runs with low per-class accepted trials "
+            f"(recommended >= {run_min}): {[item['run_stem'] for item in runs_below_min]}"
+        )
+
+    dropped_continuous_gate_neg_total = int(
+        sum(
+            int(record.get("gate_neg_dropped_continuous", 0))
+            for record in source_records
+            if isinstance(record, dict)
+        )
+    )
+
+    return {
+        "ready_for_stable_comparison": bool(not warnings),
+        "recommended_total_class_trials": int(total_min),
+        "recommended_run_class_trials": int(run_min),
+        "total_class_counts": total_counts,
+        "classes_below_total_min": classes_below_total,
+        "run_checks": run_checks,
+        "runs_below_run_min": runs_below_min,
+        "gate_neg_dropped_continuous_total": dropped_continuous_gate_neg_total,
+        "warnings": warnings,
+    }
 
 
 def per_class_accuracy(y_true: np.ndarray, y_pred: np.ndarray, class_names: list[str]) -> dict[str, float]:
@@ -2440,6 +2536,9 @@ def train_custom_model(
     report_path: Path,
     random_state: int = 42,
     min_class_trials: int = 5,
+    recommended_total_class_trials: int = DEFAULT_RECOMMENDED_TOTAL_CLASS_TRIALS,
+    recommended_run_class_trials: int = DEFAULT_RECOMMENDED_RUN_CLASS_TRIALS,
+    enforce_readiness: bool = False,
     window_secs: list[float] | None = None,
     window_offset_secs: list[float] | None = None,
     fusion_method: str = DEFAULT_FUSION_METHOD,
@@ -2522,6 +2621,19 @@ def train_custom_model(
         class_names,
         min_class_trials=int(min_class_trials),
     )
+    dataset_readiness = evaluate_dataset_readiness(
+        label_distribution=label_distribution,
+        source_records=list(loaded.get("source_records", [])),
+        class_names=class_names,
+        recommended_total_class_trials=int(recommended_total_class_trials),
+        recommended_run_class_trials=int(recommended_run_class_trials),
+    )
+    if enforce_readiness and not bool(dataset_readiness.get("ready_for_stable_comparison", False)):
+        warnings = list(dataset_readiness.get("warnings", []))
+        raise RuntimeError(
+            "Dataset readiness check failed (--enforce-readiness). "
+            f"Warnings: {warnings}"
+        )
 
     train_idx, val_idx, test_idx, split_strategy = split_trials(
         y,
@@ -4168,6 +4280,8 @@ def train_custom_model(
         "val_trials": int(val_idx.shape[0]),
         "test_trials": int(test_idx.shape[0]),
         "label_distribution": label_distribution,
+        "dataset_readiness": dataset_readiness,
+        "enforce_readiness": bool(enforce_readiness),
         "recommended_runtime": recommended_runtime,
         "rest_calibration": rest_calibration_summary,
         "control_gate": gate_summary,
@@ -4222,6 +4336,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--report-path", type=Path, default=DEFAULT_REPORT_PATH, help="输出训练摘要路径")
     parser.add_argument("--random-state", type=int, default=42, help="随机种子")
     parser.add_argument("--min-class-trials", type=int, default=5, help="每个类别最少有效 trial 数")
+    parser.add_argument(
+        "--recommended-total-class-trials",
+        type=int,
+        default=DEFAULT_RECOMMENDED_TOTAL_CLASS_TRIALS,
+        help="Advisory target for per-class accepted MI trials across all loaded runs (default: 30).",
+    )
+    parser.add_argument(
+        "--recommended-run-class-trials",
+        type=int,
+        default=DEFAULT_RECOMMENDED_RUN_CLASS_TRIALS,
+        help="Advisory target for per-class accepted MI trials inside one run (default: 8).",
+    )
+    parser.add_argument(
+        "--enforce-readiness",
+        action="store_true",
+        help="Fail training when advisory readiness checks are not met.",
+    )
     parser.add_argument(
         "--window-secs",
         type=str,
@@ -4359,6 +4490,9 @@ def main(argv: list[str] | None = None) -> int:
         report_path=args.report_path.resolve(),
         random_state=int(args.random_state),
         min_class_trials=int(args.min_class_trials),
+        recommended_total_class_trials=int(args.recommended_total_class_trials),
+        recommended_run_class_trials=int(args.recommended_run_class_trials),
+        enforce_readiness=bool(args.enforce_readiness),
         window_secs=parse_float_list(args.window_secs),
         window_offset_secs=(
             parse_float_list(args.window_offset_secs)
@@ -4409,6 +4543,10 @@ def main(argv: list[str] | None = None) -> int:
     control_gate_summary = dict(summary.get("control_gate") or {})
     artifact_rejector_summary = dict(summary.get("artifact_rejector") or {})
     continuous_summary = dict(summary.get("continuous_online_like_eval") or {})
+    dataset_readiness = dict(summary.get("dataset_readiness") or {})
+    print(f"dataset_readiness_ready={bool(dataset_readiness.get('ready_for_stable_comparison', False))}")
+    if dataset_readiness.get("warnings"):
+        print(f"dataset_readiness_warnings={dataset_readiness['warnings']}")
     print(f"control_gate_enabled={bool(control_gate_summary.get('enabled', False))}")
     print(f"artifact_rejector_enabled={bool(artifact_rejector_summary.get('enabled', False))}")
     print(f"continuous_eval_available={bool(continuous_summary.get('available', False))}")
