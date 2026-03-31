@@ -1,86 +1,134 @@
-# 训练程序说明
+﻿# 训练模块说明
 
-主入口：
-- `run_training_pycharm.py`
+训练入口会从 `datasets/custom_mi` 读取采集结果，产出实时可加载工件。
 
-核心实现：
-- `train_custom_dataset.py`
+## 1. 入口
 
-## 运行
+推荐（项目根目录）：
 
-```bash
-conda activate MI
+```powershell
+python run_02_training.py
+```
+
+等价入口：
+
+```powershell
 python code/training/run_training_pycharm.py
 ```
 
-## 训练程序如何读取采集数据
+直接使用 CLI：
 
-训练数据根目录默认是：
-- `datasets/custom_mi/`
-
-读取逻辑：
-1. 递归搜索所有 `epochs.npz`
-2. 读取每个文件的 `X/y/accepted/class_names/channel_names/sampling_rate`
-3. 只保留 `accepted==1` 的试次
-4. 校验所有 session 的 `channel_names/class_names/sampling_rate` 一致
-5. 若各 session 样本长度不同，统一裁剪到最短长度后合并
-6. 最终合并为一个训练集
-
-## 训练前预处理
-
-训练前会执行（优化版经典流程）：
-- 带通：`4-40 Hz`
-- 陷波：`50 Hz`
-- CAR（common average reference）
-- 标准化（按 trial、按通道）
-
-## 模型选择与评估
-
-候选管线：
-- `hybrid+lda`
-- `hybrid+svm`
-
-流程：
-1. 按类别分层切分 `train/val/test`（约 60%/20%/20%）
-2. 在验证集上选择最佳候选
-3. 用 `train+val` 重训最佳模型
-4. 在测试集输出 `test_acc` 与 `kappa`
-
-附加鲁棒性：
-- `--min-class-trials` 控制每类最少有效 trial（默认 5）
-- 候选模型失败会记录错误并继续尝试其他候选
-- 输出每个类别的测试准确率 `per_class_test_acc`
-
-## 输出文件
-
-默认输出：
-- 模型：`code/realtime/models/custom_mi_realtime.joblib`
-- 模型摘要：`code/realtime/models/custom_mi_realtime.json`
-- 训练摘要：`code/training/reports/custom_mi_training_summary.json`
-
-其中 `joblib` 里包含实时程序需要的关键字段：
-- `pipeline`（训练好的 sklearn 管线）
-- `class_names` / `display_class_names`
-- `channel_names`
-- `sampling_rate`
-- `window_sec`
-- `preprocessing`
-- `metrics`
-
-## 常用命令
-
-训练全部被试（默认）：
-```bash
+```powershell
 python code/training/train_custom_dataset.py
 ```
 
-只训练一个被试：
-```bash
+## 2. 默认输入与输出
+
+默认输入：
+
+- `datasets/custom_mi`
+
+默认输出：
+
+- 模型：`code/realtime/models/custom_mi_realtime.joblib`
+- 训练摘要：`code/training/reports/custom_mi_training_summary.json`
+- 旁路 JSON：`code/realtime/models/custom_mi_realtime.json`
+
+## 3. 训练读取规则
+
+优先读取 task-specific 文件：
+
+- `*_mi_epochs.npz`
+- `*_gate_epochs.npz`
+- `*_artifact_epochs.npz`
+- `*_continuous.npz`
+
+兼容 legacy：
+
+- `*_epochs.npz` / `epochs.npz`
+
+数据要求：
+
+- `channel_names`、`class_names`、`sampling_rate` 跨文件必须一致
+- `accepted=0` 的 trial 会自动过滤
+
+## 4. 训练任务拆分
+
+- 主模型：四类 MI 分类（left/right/feet/tongue）
+- `control_gate`：control vs no-control
+- `artifact_rejector`：clean vs artifact
+- continuous：online-like 离线评估
+
+## 5. 默认关键参数
+
+- 预处理：`4-40Hz` 带通 + `50Hz` 陷波 + `CAR`
+- `window_secs=2.0,2.5,3.0`
+- `window_offset_secs=0.25,0.5,0.75`
+- `min_class_trials=5`
+
+重要约束：
+
+- 采集 `imagery_sec` 需要满足：`>= max(window_secs)+max(window_offset_secs)`
+- 默认至少 `3.75s`，建议采集时用 `4.0s` 以上
+
+## 6. 候选模型
+
+默认主分类候选：
+
+- `central_fbcsp_lda`
+- `central_prior_dual_branch_fblight_tcn`
+- `riemann+lda`
+
+默认 gate 候选：
+
+- `central_gate_fblight`
+- `central_prior_gate_fblight`
+
+默认 artifact 候选：
+
+- `full8_fblight`
+
+若环境无 torch，深度候选会自动回退为 classical 可用组合。
+
+## 7. 常用命令
+
+训练全部数据：
+
+```powershell
+python code/training/train_custom_dataset.py
+```
+
+只训练某个被试：
+
+```powershell
 python code/training/train_custom_dataset.py --subject 001
 ```
 
-自定义最小 trial 数：
-```bash
-python code/training/train_custom_dataset.py --min-class-trials 8
+指定窗口和 offset：
+
+```powershell
+python code/training/train_custom_dataset.py --window-secs 2.0,2.5 --window-offset-secs 0.25,0.5
 ```
 
+覆盖候选模型：
+
+```powershell
+python code/training/train_custom_dataset.py `
+  --candidate-names central_fbcsp_lda,riemann+lda `
+  --gate-candidate-names central_gate_fblight `
+  --artifact-candidate-names full8_fblight
+```
+
+## 8. 训练结果中值得重点看
+
+命令行会打印：
+
+- `bank_test_acc / bank_macro_f1 / bank_kappa`
+- `control_gate_enabled`
+- `artifact_rejector_enabled`
+- `recommended_thresholds`
+- `recommended_gate_thresholds`
+- `recommended_artifact_thresholds`
+- `continuous_online_like`（evaluated、mi_acc、no_control_fa）
+
+建议先确认 gate/rejector 是否可用，再做实时测试。

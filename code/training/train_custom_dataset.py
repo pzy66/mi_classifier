@@ -20,7 +20,13 @@ SHARED_ROOT = PROJECT_ROOT / "code" / "shared"
 if str(SHARED_ROOT) not in sys.path:
     sys.path.insert(0, str(SHARED_ROOT))
 
-from src.models import TORCH_AVAILABLE, build_optimized_candidates
+from src.models import (
+    TORCH_AVAILABLE,
+    apply_probability_calibration,
+    build_optimized_candidates,
+    fit_probability_calibration,
+    predict_probability_matrix,
+)
 from src.preprocessing import preprocess
 from src.realtime_mi import build_realtime_artifact_bank
 
@@ -47,7 +53,11 @@ DEFAULT_FUSION_WEIGHT_GRID_STEP = 0.05
 DEFAULT_EPOCH_LENGTH_TOLERANCE_SAMPLES = 8
 DEFAULT_REST_WINDOW_STEP_SEC = 0.5
 DEFAULT_REST_FALSE_ACTIVATION_TARGET = 0.10
-DEFAULT_CLASSICAL_CANDIDATE_NAMES = ["central_fbcsp_lda"]
+DEFAULT_MAIN_CANDIDATE_NAMES = [
+    "central_fbcsp_lda",
+    "central_prior_dual_branch_fblight_tcn",
+    "riemann+lda",
+]
 DEFAULT_GATE_CANDIDATE_NAMES = ["central_gate_fblight", "central_prior_gate_fblight"]
 DEFAULT_ARTIFACT_CANDIDATE_NAMES = ["full8_fblight"]
 DEFAULT_TORCH_EPOCHS = 80
@@ -164,8 +174,10 @@ def default_window_offsets() -> list[float]:
 
 
 def default_candidate_names() -> list[str]:
-    """Return the conservative default model search space used for anchor-first training."""
-    return list(DEFAULT_CLASSICAL_CANDIDATE_NAMES)
+    """Return the default main-model anchor set used during selection."""
+    if TORCH_AVAILABLE:
+        return list(DEFAULT_MAIN_CANDIDATE_NAMES)
+    return [name for name in DEFAULT_MAIN_CANDIDATE_NAMES if name != "central_prior_dual_branch_fblight_tcn"]
 
 
 def default_gate_candidate_names(candidate_names: list[str] | None = None) -> list[str]:
@@ -1307,28 +1319,25 @@ def metric_sort_key(metrics: dict[str, object]) -> tuple[float, float, float]:
 
 def _predict_probability_matrix(model, X: np.ndarray, n_classes: int) -> np.ndarray:
     """Return an (n_samples, n_classes) probability-like matrix for fusion."""
-    if hasattr(model, "predict_proba"):
-        probabilities = np.asarray(model.predict_proba(X), dtype=np.float64)
-        if probabilities.ndim == 2 and probabilities.shape[1] == n_classes:
-            probabilities = np.nan_to_num(probabilities, nan=0.0, posinf=0.0, neginf=0.0)
-            row_sums = np.sum(probabilities, axis=1, keepdims=True)
-            row_sums[row_sums <= 0.0] = 1.0
-            return probabilities / row_sums
+    return predict_probability_matrix(model, X, n_classes)
 
-    if hasattr(model, "decision_function"):
-        decision_values = np.asarray(model.decision_function(X), dtype=np.float64)
-        decision_values = np.atleast_2d(decision_values)
-        if decision_values.shape[1] == n_classes:
-            shifted = decision_values - np.max(decision_values, axis=1, keepdims=True)
-            exponentiated = np.exp(shifted)
-            row_sums = np.sum(exponentiated, axis=1, keepdims=True)
-            row_sums[row_sums <= 0.0] = 1.0
-            return exponentiated / row_sums
 
-    predictions = np.asarray(model.predict(X), dtype=np.int64).reshape(-1)
-    fallback = np.zeros((predictions.shape[0], n_classes), dtype=np.float64)
-    fallback[np.arange(predictions.shape[0]), predictions] = 1.0
-    return fallback
+def calibrate_probability_matrix(
+    probabilities: np.ndarray,
+    labels: np.ndarray,
+    *,
+    role: str,
+    selection_source: str,
+) -> tuple[dict[str, object], np.ndarray]:
+    """Fit and apply a temperature-scaling calibration object on validation probabilities."""
+    calibration = fit_probability_calibration(
+        probabilities,
+        labels,
+        role=role,
+        selection_source=selection_source,
+    )
+    calibrated = apply_probability_calibration(probabilities, calibration)
+    return calibration, np.asarray(calibrated, dtype=np.float64)
 
 
 def fuse_probability_stack(
@@ -1516,6 +1525,7 @@ def predict_multi_offset_probability_matrix(
     split_name: str,
     offset_secs: list[float],
     class_count: int,
+    probability_calibration: dict[str, object] | None = None,
 ) -> np.ndarray:
     """Predict one probability row per original trial by averaging over all configured offsets."""
     probability_matrices = []
@@ -1529,7 +1539,10 @@ def predict_multi_offset_probability_matrix(
         raise ValueError(f"No probability matrices were produced for split={split_name!r}.")
 
     stacked = np.stack(probability_matrices, axis=0)
-    return np.mean(stacked, axis=0, dtype=np.float64)
+    averaged = np.mean(stacked, axis=0, dtype=np.float64)
+    if probability_calibration:
+        averaged = apply_probability_calibration(averaged, probability_calibration)
+    return np.asarray(averaged, dtype=np.float64)
 
 
 def build_binary_dataset(
@@ -1657,6 +1670,7 @@ def evaluate_bank_on_raw_windows(
     fusion_weights: list[float] | tuple[float, ...] | np.ndarray,
     fusion_method: str,
     class_count: int,
+    probability_calibration: dict[str, object] | None = None,
 ) -> tuple[np.ndarray, list[np.ndarray]]:
     """Run each selected member on raw windows and fuse the resulting probabilities."""
     raw_windows = np.asarray(raw_windows, dtype=np.float32)
@@ -1675,7 +1689,12 @@ def evaluate_bank_on_raw_windows(
             )
         member_input = np.ascontiguousarray(raw_windows[:, :, -window_samples:], dtype=np.float32)
         processed = preprocess_trials(member_input, sampling_rate)
-        probabilities = _predict_probability_matrix(member_artifact["pipeline"], processed, class_count)
+        probabilities = predict_probability_matrix(
+            member_artifact["pipeline"],
+            processed,
+            class_count,
+            probability_calibration=member_artifact.get("probability_calibration"),
+        )
         probability_vectors.append(np.asarray(probabilities, dtype=np.float64))
 
     fused = fuse_probability_stack(
@@ -1683,6 +1702,8 @@ def evaluate_bank_on_raw_windows(
         fusion_weights,
         fusion_method=fusion_method,
     )
+    if probability_calibration:
+        fused = apply_probability_calibration(fused, probability_calibration)
     return fused, probability_vectors
 
 
@@ -1894,16 +1915,19 @@ def evaluate_continuous_online_like(
     main_member_artifacts: list[dict[str, object]],
     main_fusion_weights: list[float],
     main_fusion_method: str,
+    main_probability_calibration: dict[str, object] | None,
     class_names: list[str],
     sampling_rate: float,
     main_runtime: dict[str, object] | None,
     gate_member_artifacts: list[dict[str, object]] | None = None,
     gate_fusion_weights: list[float] | None = None,
     gate_fusion_method: str = DEFAULT_FUSION_METHOD,
+    gate_probability_calibration: dict[str, object] | None = None,
     gate_runtime: dict[str, object] | None = None,
     artifact_member_artifacts: list[dict[str, object]] | None = None,
     artifact_fusion_weights: list[float] | None = None,
     artifact_fusion_method: str = DEFAULT_FUSION_METHOD,
+    artifact_probability_calibration: dict[str, object] | None = None,
     artifact_runtime: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """Evaluate final trained models on continuous prompts without using those blocks for fitting."""
@@ -2044,6 +2068,7 @@ def evaluate_continuous_online_like(
                 fusion_weights=main_fusion_weights,
                 fusion_method=main_fusion_method,
                 class_count=main_class_count,
+                probability_calibration=main_probability_calibration,
             )
             main_row = np.asarray(main_probs[0], dtype=np.float64)
             main_prediction = int(np.argmax(main_row))
@@ -2063,6 +2088,7 @@ def evaluate_continuous_online_like(
                     fusion_weights=list(artifact_fusion_weights or []),
                     fusion_method=artifact_fusion_method,
                     class_count=len(ARTIFACT_REJECTOR_CLASS_NAMES),
+                    probability_calibration=artifact_probability_calibration,
                 )
                 artifact_row = np.asarray(artifact_probs[0], dtype=np.float64)
                 artifact_rejected = _threshold_accept(
@@ -2081,6 +2107,7 @@ def evaluate_continuous_online_like(
                     fusion_weights=list(gate_fusion_weights or []),
                     fusion_method=gate_fusion_method,
                     class_count=len(GATE_CLASS_NAMES),
+                    probability_calibration=gate_probability_calibration,
                 )
                 gate_row = np.asarray(gate_probs[0], dtype=np.float64)
                 gate_accept = _threshold_accept(
@@ -2852,6 +2879,7 @@ def train_custom_model(
         best_offset_sec = None
         best_selection_metrics = None
         best_selection_val_probabilities = None
+        best_probability_calibration = None
         best_guided_offset_scores = None
         candidate_scores = []
         candidate_errors = []
@@ -2920,12 +2948,18 @@ def train_custom_model(
         for name, pipeline in candidate_factory().items():
             try:
                 pipeline.fit(main_train_X, main_train_y)
-                val_probabilities = predict_multi_offset_probability_matrix(
+                raw_val_probabilities = predict_multi_offset_probability_matrix(
                     pipeline,
                     processed_by_offset,
                     "val",
                     selected_offset_secs,
                     len(class_names),
+                )
+                member_probability_calibration, val_probabilities = calibrate_probability_matrix(
+                    raw_val_probabilities,
+                    split_labels["val"],
+                    role="main_classifier_member",
+                    selection_source="main_member_selection_val",
                 )
             except Exception as error:
                 candidate_errors.append(
@@ -2949,10 +2983,14 @@ def train_custom_model(
             guided_best_offset_sec = None
             guided_best_metrics = None
             for offset_sec in selected_offset_secs:
-                guided_probabilities = _predict_probability_matrix(
+                raw_guided_probabilities = _predict_probability_matrix(
                     pipeline,
                     processed_by_offset[float(offset_sec)]["val"],
                     len(class_names),
+                )
+                guided_probabilities = apply_probability_calibration(
+                    raw_guided_probabilities,
+                    member_probability_calibration,
                 )
                 guided_predictions = np.argmax(guided_probabilities, axis=1)
                 guided_metrics = classification_metrics(split_labels["val"], guided_predictions, class_names)
@@ -2980,6 +3018,7 @@ def train_custom_model(
                     "val_acc": float(val_metrics["acc"]),
                     "val_kappa": float(val_metrics["kappa"]),
                     "val_macro_acc": float(val_metrics["macro_acc"]),
+                    "calibration_temperature": float(member_probability_calibration["temperature"]),
                     "guided_offset_scores": guided_offset_scores,
                 }
             )
@@ -2993,9 +3032,15 @@ def train_custom_model(
                 best_offset_sec = float(guided_best_offset_sec)
                 best_selection_metrics = val_metrics
                 best_selection_val_probabilities = val_probabilities
+                best_probability_calibration = dict(member_probability_calibration)
                 best_guided_offset_scores = guided_offset_scores
 
-        if best_name is None or best_offset_sec is None or best_selection_metrics is None:
+        if (
+            best_name is None
+            or best_offset_sec is None
+            or best_selection_metrics is None
+            or best_probability_calibration is None
+        ):
             raise RuntimeError(
                 f"No candidate trained successfully for {window_sec:.2f}s. Errors: {candidate_errors}"
             )
@@ -3008,6 +3053,7 @@ def train_custom_model(
             "test",
             selected_offset_secs,
             len(class_names),
+            probability_calibration=best_probability_calibration,
         )
         test_predictions = np.argmax(test_probabilities, axis=1)
         test_metrics = classification_metrics(split_labels["test"], test_predictions, class_names)
@@ -3025,6 +3071,7 @@ def train_custom_model(
         member_artifact = {
             "artifact_type": "single_window",
             "pipeline": final_pipeline,
+            "probability_calibration": dict(best_probability_calibration),
             "subject_id": subject_filter or "all_subjects",
             "selected_pipeline": best_name,
             "model_type": "optimized",
@@ -3085,6 +3132,7 @@ def train_custom_model(
             "window_offset_secs_used": [float(item) for item in selected_offset_secs],
             "training_mode": "multi_offset_augmented",
             "selected_pipeline": best_name,
+            "probability_calibration": dict(best_probability_calibration),
             "metrics": member_artifact["metrics"],
             "candidate_scores": candidate_scores,
             "candidate_errors": candidate_errors,
@@ -3141,17 +3189,24 @@ def train_custom_model(
             best_gate_name = None
             best_gate_metrics = None
             best_gate_val_probabilities = None
+            best_gate_probability_calibration = None
             gate_candidate_scores = []
             gate_candidate_errors = []
             for name, pipeline in gate_candidate_factory().items():
                 try:
                     pipeline.fit(gate_train_X, gate_train_y)
-                    gate_val_predictions = pipeline.predict(gate_val_X)
-                    gate_val_probabilities = _predict_probability_matrix(
+                    raw_gate_val_probabilities = _predict_probability_matrix(
                         pipeline,
                         gate_val_X,
                         len(GATE_CLASS_NAMES),
                     )
+                    gate_probability_calibration, gate_val_probabilities = calibrate_probability_matrix(
+                        raw_gate_val_probabilities,
+                        gate_val_y,
+                        role="control_gate_member",
+                        selection_source="control_gate_selection_val",
+                    )
+                    gate_val_predictions = np.argmax(gate_val_probabilities, axis=1)
                 except Exception as error:
                     gate_candidate_errors.append({"name": name, "error": str(error)})
                     print(f"window={window_sec:.2f}s gate candidate={name:<16} failed: {error}")
@@ -3164,6 +3219,7 @@ def train_custom_model(
                         "val_acc": float(gate_val_metrics["acc"]),
                         "val_kappa": float(gate_val_metrics["kappa"]),
                         "val_macro_acc": float(gate_val_metrics["macro_acc"]),
+                        "calibration_temperature": float(gate_probability_calibration["temperature"]),
                     }
                 )
                 print(
@@ -3174,16 +3230,26 @@ def train_custom_model(
                     best_gate_name = name
                     best_gate_metrics = gate_val_metrics
                     best_gate_val_probabilities = gate_val_probabilities
+                    best_gate_probability_calibration = dict(gate_probability_calibration)
 
-            if best_gate_name is not None and best_gate_metrics is not None and best_gate_val_probabilities is not None:
+            if (
+                best_gate_name is not None
+                and best_gate_metrics is not None
+                and best_gate_val_probabilities is not None
+                and best_gate_probability_calibration is not None
+            ):
                 final_gate_pipeline = gate_candidate_factory()[best_gate_name]
                 final_gate_pipeline.fit(gate_trainval_X, gate_trainval_y)
-                gate_test_predictions = final_gate_pipeline.predict(gate_test_X)
-                gate_test_probabilities = _predict_probability_matrix(
+                raw_gate_test_probabilities = _predict_probability_matrix(
                     final_gate_pipeline,
                     gate_test_X,
                     len(GATE_CLASS_NAMES),
                 )
+                gate_test_probabilities = apply_probability_calibration(
+                    raw_gate_test_probabilities,
+                    best_gate_probability_calibration,
+                )
+                gate_test_predictions = np.argmax(gate_test_probabilities, axis=1)
                 gate_test_metrics = classification_metrics(gate_test_y, gate_test_predictions, GATE_CLASS_NAMES)
 
                 if gate_val_labels_reference is None:
@@ -3200,6 +3266,7 @@ def train_custom_model(
                 gate_member_artifact = {
                     "artifact_type": "single_window",
                     "pipeline": final_gate_pipeline,
+                    "probability_calibration": dict(best_gate_probability_calibration),
                     "subject_id": subject_filter or "all_subjects",
                     "selected_pipeline": best_gate_name,
                     "model_type": "optimized",
@@ -3247,6 +3314,7 @@ def train_custom_model(
                     "available": True,
                     "window_sec": float(window_sec),
                     "selected_pipeline": best_gate_name,
+                    "probability_calibration": dict(best_gate_probability_calibration),
                     "metrics": gate_member_artifact["metrics"],
                     "candidate_scores": gate_candidate_scores,
                     "candidate_errors": gate_candidate_errors,
@@ -3305,17 +3373,24 @@ def train_custom_model(
             best_artifact_name = None
             best_artifact_metrics = None
             best_artifact_val_probabilities = None
+            best_artifact_probability_calibration = None
             artifact_candidate_scores = []
             artifact_candidate_errors = []
             for name, pipeline in artifact_candidate_factory().items():
                 try:
                     pipeline.fit(artifact_train_X_balanced, artifact_train_y_balanced)
-                    artifact_val_predictions = pipeline.predict(artifact_val_X)
-                    artifact_val_probabilities = _predict_probability_matrix(
+                    raw_artifact_val_probabilities = _predict_probability_matrix(
                         pipeline,
                         artifact_val_X,
                         len(ARTIFACT_REJECTOR_CLASS_NAMES),
                     )
+                    artifact_probability_calibration, artifact_val_probabilities = calibrate_probability_matrix(
+                        raw_artifact_val_probabilities,
+                        artifact_val_y,
+                        role="artifact_rejector_member",
+                        selection_source="artifact_rejector_selection_val",
+                    )
+                    artifact_val_predictions = np.argmax(artifact_val_probabilities, axis=1)
                 except Exception as error:
                     artifact_candidate_errors.append({"name": name, "error": str(error)})
                     print(f"window={window_sec:.2f}s artifact candidate={name:<16} failed: {error}")
@@ -3332,6 +3407,7 @@ def train_custom_model(
                         "val_acc": float(artifact_val_metrics["acc"]),
                         "val_kappa": float(artifact_val_metrics["kappa"]),
                         "val_macro_acc": float(artifact_val_metrics["macro_acc"]),
+                        "calibration_temperature": float(artifact_probability_calibration["temperature"]),
                     }
                 )
                 print(
@@ -3343,20 +3419,26 @@ def train_custom_model(
                     best_artifact_name = name
                     best_artifact_metrics = artifact_val_metrics
                     best_artifact_val_probabilities = artifact_val_probabilities
+                    best_artifact_probability_calibration = dict(artifact_probability_calibration)
 
             if (
                 best_artifact_name is not None
                 and best_artifact_metrics is not None
                 and best_artifact_val_probabilities is not None
+                and best_artifact_probability_calibration is not None
             ):
                 final_artifact_pipeline = artifact_candidate_factory()[best_artifact_name]
                 final_artifact_pipeline.fit(artifact_trainval_X_balanced, artifact_trainval_y_balanced)
-                artifact_test_predictions = final_artifact_pipeline.predict(artifact_test_X)
-                artifact_test_probabilities = _predict_probability_matrix(
+                raw_artifact_test_probabilities = _predict_probability_matrix(
                     final_artifact_pipeline,
                     artifact_test_X,
                     len(ARTIFACT_REJECTOR_CLASS_NAMES),
                 )
+                artifact_test_probabilities = apply_probability_calibration(
+                    raw_artifact_test_probabilities,
+                    best_artifact_probability_calibration,
+                )
+                artifact_test_predictions = np.argmax(artifact_test_probabilities, axis=1)
                 artifact_test_metrics = classification_metrics(
                     artifact_test_y,
                     artifact_test_predictions,
@@ -3377,6 +3459,7 @@ def train_custom_model(
                 artifact_member_artifact = {
                     "artifact_type": "single_window",
                     "pipeline": final_artifact_pipeline,
+                    "probability_calibration": dict(best_artifact_probability_calibration),
                     "subject_id": subject_filter or "all_subjects",
                     "selected_pipeline": best_artifact_name,
                     "model_type": "optimized",
@@ -3423,6 +3506,7 @@ def train_custom_model(
                     "available": True,
                     "window_sec": float(window_sec),
                     "selected_pipeline": best_artifact_name,
+                    "probability_calibration": dict(best_artifact_probability_calibration),
                     "candidate_names": list(selected_artifact_candidate_names),
                     "class_names": list(ARTIFACT_REJECTOR_CLASS_NAMES),
                     "metrics": artifact_member_artifact["metrics"],
@@ -3498,11 +3582,19 @@ def train_custom_model(
         bank_artifact["fusion_weights"],
         fusion_method=fusion_method,
     )
+    bank_probability_calibration, fused_val = calibrate_probability_matrix(
+        fused_val,
+        split_labels["val"],
+        role="main_classifier_bank",
+        selection_source="main_bank_selection_val",
+    )
+    fused_test = apply_probability_calibration(fused_test, bank_probability_calibration)
     fused_val_predictions = np.argmax(fused_val, axis=1)
     fused_test_predictions = np.argmax(fused_test, axis=1)
     fused_val_metrics = classification_metrics(split_labels["val"], fused_val_predictions, class_names)
     fused_test_metrics = classification_metrics(split_labels["test"], fused_test_predictions, class_names)
 
+    bank_artifact["probability_calibration"] = dict(bank_probability_calibration)
     bank_artifact["metrics"] = {
         "selection_val_acc": float(fused_val_metrics["acc"]),
         "selection_val_kappa": float(fused_val_metrics["kappa"]),
@@ -3608,6 +3700,16 @@ def train_custom_model(
             gate_bank_artifact["fusion_weights"],
             fusion_method=fusion_method,
         )
+        gate_bank_probability_calibration, fused_gate_val = calibrate_probability_matrix(
+            fused_gate_val,
+            gate_val_labels_reference,
+            role="control_gate_bank",
+            selection_source="control_gate_bank_selection_val",
+        )
+        fused_gate_test = apply_probability_calibration(
+            fused_gate_test,
+            gate_bank_probability_calibration,
+        )
         fused_gate_val_predictions = np.argmax(fused_gate_val, axis=1)
         fused_gate_test_predictions = np.argmax(fused_gate_test, axis=1)
         fused_gate_val_metrics = classification_metrics(
@@ -3635,6 +3737,7 @@ def train_custom_model(
             },
             "selection_source": "control_gate_calibration",
             "calibration": gate_threshold_recommendation,
+            "probability_calibration": dict(gate_bank_probability_calibration),
             "decision_role": "control_gate",
             "outputs": {
                 "probability": "gate_probabilities",
@@ -3654,6 +3757,7 @@ def train_custom_model(
             margin_threshold=float(gate_runtime["margin_threshold"]),
             control_class_index=1,
         )
+        gate_bank_artifact["probability_calibration"] = dict(gate_bank_probability_calibration)
         gate_bank_artifact["recommended_runtime"] = gate_runtime
         gate_bank_artifact["metrics"] = {
             "selection_val_acc": float(fused_gate_val_metrics["acc"]),
@@ -3689,6 +3793,7 @@ def train_custom_model(
             "candidate_names": list(selected_gate_candidate_names),
             "fusion_weights": list(gate_bank_artifact["fusion_weights"]),
             "fusion_method": fusion_method,
+            "probability_calibration": dict(gate_bank_probability_calibration),
             "recommended_runtime": gate_runtime,
             "metrics": gate_bank_artifact["metrics"],
             "member_models": gate_member_summaries,
@@ -3759,6 +3864,16 @@ def train_custom_model(
             artifact_bank_artifact["fusion_weights"],
             fusion_method=fusion_method,
         )
+        artifact_bank_probability_calibration, fused_artifact_val = calibrate_probability_matrix(
+            fused_artifact_val,
+            artifact_val_labels_reference,
+            role="artifact_rejector_bank",
+            selection_source="artifact_rejector_bank_selection_val",
+        )
+        fused_artifact_test = apply_probability_calibration(
+            fused_artifact_test,
+            artifact_bank_probability_calibration,
+        )
         fused_artifact_val_predictions = np.argmax(fused_artifact_val, axis=1)
         fused_artifact_test_predictions = np.argmax(fused_artifact_test, axis=1)
         fused_artifact_val_metrics = classification_metrics(
@@ -3786,6 +3901,7 @@ def train_custom_model(
             },
             "selection_source": "artifact_rejector_calibration",
             "calibration": artifact_threshold_recommendation,
+            "probability_calibration": dict(artifact_bank_probability_calibration),
             "decision_role": "bad_window_rejector",
             "outputs": {
                 "probability": "artifact_probabilities",
@@ -3805,6 +3921,7 @@ def train_custom_model(
             margin_threshold=float(artifact_runtime["margin_threshold"]),
             control_class_index=1,
         )
+        artifact_bank_artifact["probability_calibration"] = dict(artifact_bank_probability_calibration)
         artifact_bank_artifact["recommended_runtime"] = artifact_runtime
         artifact_bank_artifact["metrics"] = {
             "selection_val_acc": float(fused_artifact_val_metrics["acc"]),
@@ -3841,6 +3958,7 @@ def train_custom_model(
             "class_names": list(ARTIFACT_REJECTOR_CLASS_NAMES),
             "fusion_weights": list(artifact_bank_artifact["fusion_weights"]),
             "fusion_method": fusion_method,
+            "probability_calibration": dict(artifact_bank_probability_calibration),
             "recommended_runtime": artifact_runtime,
             "metrics": artifact_bank_artifact["metrics"],
             "member_models": artifact_member_summaries,
@@ -3888,6 +4006,7 @@ def train_custom_model(
                 fusion_weights=bank_artifact["fusion_weights"],
                 fusion_method=fusion_method,
                 class_count=len(class_names),
+                probability_calibration=bank_artifact.get("probability_calibration"),
             )
             threshold_recommendation = select_reject_thresholds(
                 fused_val,
@@ -3899,6 +4018,7 @@ def train_custom_model(
                 "margin_threshold": float(threshold_recommendation["margin_threshold"]),
                 "selection_source": "rest_calibration",
                 "calibration": threshold_recommendation,
+                "probability_calibration": dict(bank_artifact["probability_calibration"]),
             }
 
             calibration_test_segments = [rest_segments_all[index] for index, keep in enumerate(rest_test_mask.tolist()) if keep]
@@ -3923,6 +4043,7 @@ def train_custom_model(
                         fusion_weights=bank_artifact["fusion_weights"],
                         fusion_method=fusion_method,
                         class_count=len(class_names),
+                        probability_calibration=bank_artifact.get("probability_calibration"),
                     )
                     test_recommendation = select_reject_thresholds(
                         fused_test,
@@ -3946,6 +4067,7 @@ def train_custom_model(
         main_member_artifacts=member_artifacts,
         main_fusion_weights=list(bank_artifact["fusion_weights"]),
         main_fusion_method=fusion_method,
+        main_probability_calibration=bank_artifact.get("probability_calibration"),
         class_names=class_names,
         sampling_rate=sampling_rate,
         main_runtime=recommended_runtime,
@@ -3960,6 +4082,11 @@ def train_custom_model(
             if isinstance(bank_artifact.get("control_gate"), dict)
             else fusion_method
         ),
+        gate_probability_calibration=(
+            dict(bank_artifact["control_gate"].get("probability_calibration") or {})
+            if isinstance(bank_artifact.get("control_gate"), dict)
+            else None
+        ),
         gate_runtime=gate_runtime,
         artifact_member_artifacts=artifact_member_artifacts if bank_artifact.get("artifact_rejector") else None,
         artifact_fusion_weights=(
@@ -3971,6 +4098,11 @@ def train_custom_model(
             str(bank_artifact["artifact_rejector"].get("fusion_method", fusion_method))
             if isinstance(bank_artifact.get("artifact_rejector"), dict)
             else fusion_method
+        ),
+        artifact_probability_calibration=(
+            dict(bank_artifact["artifact_rejector"].get("probability_calibration") or {})
+            if isinstance(bank_artifact.get("artifact_rejector"), dict)
+            else None
         ),
         artifact_runtime=artifact_runtime,
     )
@@ -4012,6 +4144,7 @@ def train_custom_model(
         "central_aux_loss_weight": float(central_aux_loss_weight),
         "fusion_method": fusion_method,
         "fusion_weights": bank_artifact["fusion_weights"],
+        "probability_calibration": bank_artifact.get("probability_calibration"),
         "window_secs": [float(item) for item in bank_artifact["window_secs"]],
         "window_offset_secs": [float(item) for item in selected_offset_secs],
         "metrics": bank_artifact["metrics"],
@@ -4125,8 +4258,8 @@ def build_parser() -> argparse.ArgumentParser:
         type=str,
         default="",
         help=(
-            "Optional candidate list such as central_fbcsp_lda,central_only_fblight,"
-            "full8_fblight,central_prior_dual_branch_fblight_tcn"
+            "Optional candidate list such as central_fbcsp_lda,"
+            "central_prior_dual_branch_fblight_tcn,riemann+lda"
         ),
     )
     parser.add_argument(

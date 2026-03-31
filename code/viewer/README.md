@@ -1,40 +1,64 @@
-# viewer 模块说明
+﻿# NPZ Viewer 说明
 
-这个目录只做一件事：**查看采集后的 npz 数据**。  
-与采集、训练、实时判别完全分开。
+`viewer/` 只用于可视化采集后的 `npz`，不参与训练或实时推理。
 
-## 文件
+## 1. 入口
 
-- `mi_npz_viewer.py`：主程序（数字统计 + 波形 + 频谱 + 导出）
-- `run_npz_viewer_pycharm.py`：PyCharm 启动入口
+推荐（项目根目录）：
 
-## 启动方式
+```powershell
+python run_04_view_collected_npz.py
+```
 
-1. 项目根目录启动（推荐）  
-`python run_04_view_collected_npz.py`
+等价入口：
 
-2. viewer 目录启动  
-`python code/viewer/run_npz_viewer_pycharm.py`
+```powershell
+python code/viewer/run_npz_viewer_pycharm.py
+```
 
-3. 指定文件启动  
-`python code/viewer/mi_npz_viewer.py --npz <你的npz路径>`
+指定文件启动：
 
-## 支持读取的文件命名
+```powershell
+python code/viewer/mi_npz_viewer.py --npz <path-to-npz>
+```
 
-- 新命名：`*_epochs.npz`（采集程序自动编号后的文件）
-- 旧命名：`epochs.npz`（历史兼容）
+## 2. 支持读取的文件
 
-## 功能点
+会扫描：
 
-- 中文界面（含中文字体回退设置）
-- 自动扫描数据集目录并列出可视化文件
-- 总览统计：试次数、有效率、采样率、时长、RMS
-- 类别统计：每类总数/有效/无效
-- 通道统计：Mean/Std/RMS/PtP/AbsMean（uV）
-- 图像模式：
-  - 单试次波形
-  - 类别平均波形
-  - 类别平均频谱（PSD）
-- 统计导出：
-  - JSON
-  - CSV（类别统计 + 通道统计）
+- `*_epochs.npz`
+- `epochs.npz`
+
+并排除：
+
+- `*_gate_epochs.npz`
+- `*_artifact_epochs.npz`
+
+说明：viewer 面向主 MI epoch 结构（`X/y/accepted/trial_ids`），不是 gate/artifact 专用查看器。
+
+## 3. 主要功能
+
+- 最近文件自动扫描与选择
+- Trial / 类别 / 通道统计
+- 单 trial 波形查看
+- 类别平均波形
+- 类别平均频谱（PSD）
+- UI 中英文友好字体回退
+
+## 4. 导出
+
+支持导出：
+
+- JSON：`<stem>_viewer_stats.json`
+- CSV（类别统计）：`<stem>_class_stats.csv`
+- CSV（通道统计）：`<stem>_channel_stats.csv`
+
+## 5. 常见问题
+
+### 5.1 选择文件后提示缺少 X/y
+
+该文件不是主 epoch 结构（可能是 gate/artifact/continuous npz），请换 `*_mi_epochs.npz` 或 `*_epochs.npz`。
+
+### 5.2 图像单位看起来不对
+
+viewer 会按 `signal_unit` 自动换算到 `uV` 显示；如果历史文件单位字段异常，统计值可能偏差，请以新版采集导出文件为准。

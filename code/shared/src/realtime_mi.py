@@ -11,6 +11,7 @@ from scipy.signal import resample
 from sklearn.metrics import accuracy_score, cohen_kappa_score
 from sklearn.model_selection import train_test_split
 
+from src.models import apply_probability_calibration, fit_probability_calibration, predict_probability_matrix
 from src.train import (
     build_optimized_model_candidates,
     ensure_dataset_available,
@@ -232,31 +233,20 @@ def build_realtime_artifact_bank(
     }
 
 
-def _decision_to_probabilities(model, X: np.ndarray, n_classes: int) -> np.ndarray:
+def _decision_to_probabilities(
+    model,
+    X: np.ndarray,
+    n_classes: int,
+    probability_calibration: dict[str, object] | None = None,
+) -> np.ndarray:
     """Convert model outputs to comparable confidence scores."""
-    if hasattr(model, "predict_proba"):
-        probabilities = np.asarray(model.predict_proba(X), dtype=np.float64)
-        if probabilities.ndim == 2 and probabilities.shape[1] == n_classes:
-            row = probabilities[0]
-            row = np.nan_to_num(row, nan=0.0, posinf=0.0, neginf=0.0)
-            total = float(np.sum(row))
-            if total > 0:
-                return row / total
-
-    if hasattr(model, "decision_function"):
-        decision_values = np.asarray(model.decision_function(X), dtype=np.float64)
-        decision_values = np.atleast_2d(decision_values)[0]
-        if decision_values.shape[0] == n_classes:
-            shifted = decision_values - np.max(decision_values)
-            exponentiated = np.exp(shifted)
-            total = np.sum(exponentiated)
-            if total > 0:
-                return exponentiated / total
-
-    predictions = np.asarray(model.predict(X), dtype=np.int64)
-    fallback = np.zeros(n_classes, dtype=np.float64)
-    fallback[int(predictions[0])] = 1.0
-    return fallback
+    probabilities = predict_probability_matrix(
+        model,
+        X,
+        n_classes,
+        probability_calibration=probability_calibration,
+    )
+    return np.asarray(probabilities[0], dtype=np.float64)
 
 
 def _preprocess_single_window(raw_window: np.ndarray, artifact: dict, live_sampling_rate: float) -> np.ndarray:
@@ -339,25 +329,46 @@ def fit_realtime_model(
     best_name = None
     best_val_acc = -1.0
     best_pipeline = None
+    best_probability_calibration = None
 
     for name, pipeline in build_optimized_model_candidates(config).items():
         pipeline.fit(X_tr, y_tr)
-        val_predictions = pipeline.predict(X_val)
+        raw_val_probabilities = predict_probability_matrix(
+            pipeline,
+            X_val,
+            len(config["dataset"]["class_names"]),
+        )
+        probability_calibration = fit_probability_calibration(
+            raw_val_probabilities,
+            y_val,
+            role="realtime_main_member",
+            selection_source="realtime_selection_val",
+        )
+        val_probabilities = apply_probability_calibration(raw_val_probabilities, probability_calibration)
+        val_predictions = np.argmax(val_probabilities, axis=1)
         val_acc = accuracy_score(y_val, val_predictions)
         if val_acc > best_val_acc:
             best_name = name
             best_val_acc = val_acc
             best_pipeline = pipeline
+            best_probability_calibration = dict(probability_calibration)
 
-    if best_pipeline is None:
+    if best_pipeline is None or best_probability_calibration is None:
         raise RuntimeError("Failed to select a realtime pipeline.")
 
     best_pipeline.fit(X_train, y_train)
-    test_predictions = best_pipeline.predict(X_test)
+    test_probabilities = predict_probability_matrix(
+        best_pipeline,
+        X_test,
+        len(config["dataset"]["class_names"]),
+        probability_calibration=best_probability_calibration,
+    )
+    test_predictions = np.argmax(test_probabilities, axis=1)
 
     class_names = list(config["dataset"]["class_names"])
     artifact = {
         "pipeline": best_pipeline,
+        "probability_calibration": dict(best_probability_calibration),
         "subject_id": int(subject_id),
         "selected_pipeline": best_name,
         "model_type": "optimized",
@@ -393,6 +404,7 @@ def fit_realtime_model(
                 {
                     "subject_id": artifact["subject_id"],
                     "selected_pipeline": artifact["selected_pipeline"],
+                    "probability_calibration": artifact.get("probability_calibration"),
                     "channel_names": artifact["channel_names"],
                     "class_names": artifact["class_names"],
                     "metrics": artifact["metrics"],
@@ -739,6 +751,7 @@ class RealtimeMIPredictor:
                 entry["pipeline"],
                 processed,
                 n_classes=class_count,
+                probability_calibration=member_artifact.get("probability_calibration"),
             )
             probabilities = self._normalize_probabilities(probabilities)
             probability_vectors.append(probabilities)
@@ -778,6 +791,13 @@ class RealtimeMIPredictor:
             probability_vectors,
             normalized_weights,
             method=target_fusion_method,
+        )
+        fused_probabilities = np.asarray(
+            apply_probability_calibration(
+                fused_probabilities,
+                target_artifact.get("probability_calibration"),
+            ),
+            dtype=np.float64,
         )
 
         for evidence, normalized_weight in zip(window_evidence, normalized_weights):
@@ -830,6 +850,7 @@ class RealtimeMIPredictor:
                 entry["pipeline"],
                 processed,
                 n_classes=class_count,
+                probability_calibration=member_artifact.get("probability_calibration"),
             )
             probabilities = self._normalize_probabilities(probabilities)
             probability_vectors.append(probabilities)
@@ -869,6 +890,13 @@ class RealtimeMIPredictor:
             probability_vectors,
             normalized_weights,
             method=target_fusion_method,
+        )
+        fused_probabilities = np.asarray(
+            apply_probability_calibration(
+                fused_probabilities,
+                target_artifact.get("probability_calibration"),
+            ),
+            dtype=np.float64,
         )
         for evidence, normalized_weight in zip(window_evidence, normalized_weights):
             evidence["normalized_weight"] = float(normalized_weight)

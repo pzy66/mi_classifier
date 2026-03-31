@@ -1,63 +1,102 @@
-# 实时分类程序说明
+﻿# 实时推理模块说明
 
-主入口：
-- `run_realtime_pycharm.py`
+本模块只负责加载已训练工件做实时推理，不负责采集训练数据。
 
-核心实现：
-- `mi_realtime_infer_only.py`
+## 1. 入口
 
-## 运行
+推荐（项目根目录）：
 
-```bash
-conda activate MI
+```powershell
+python run_03_realtime_infer.py
+```
+
+等价入口：
+
+```powershell
 python code/realtime/run_realtime_pycharm.py
 ```
 
-## 实时程序如何调用训练好的模型
+可选：8 通道实时波形监视（不做分类）：
 
-程序启动时按顺序找模型：
+```powershell
+python run_05_channel_monitor.py
+```
+
+## 2. 模型加载顺序
+
+默认优先加载：
+
 1. `code/realtime/models/custom_mi_realtime.joblib`
 2. 若不存在，回退到 `code/realtime/models/subject_1_mi.joblib`
 
-加载后会读取模型内的：
-- `pipeline`（用于推理）
-- `class_names/display_class_names`（用于显示类别）
-- `channel_names`（期望输入通道数）
-- `sampling_rate` 与 `window_sec`（用于窗口长度与重采样）
-- `preprocessing`（实时预处理参数）
+如果发生回退，界面会给出 warning，建议先完成自定义训练再进行实时评估。
 
-## 连接设备步骤（已集成到界面）
+## 3. 两种实时模式
 
-1. 选择 `Board`
-2. 在 `Serial Port` 下拉框选串口（可点 `Refresh Ports`）
-3. 点击 `Connect Device`
-4. 连接成功后点击 `Start Realtime`
-5. 结束时先点 `Stop`，再点 `Disconnect`
+在 `USER_CONFIG['realtime_mode']` 选择：
 
-## 实时推理流程
+- `continuous`：每次滑窗都输出，低证据时显示 `UNCERTAIN`
+- `guided`：按 `baseline -> cue -> imagery -> iti` 协议运行
 
-1. 从 BrainFlow 拉取当前滑动窗口数据
-2. 根据模型通道数提取通道
-3. 若实时采样率与模型采样率不同，自动重采样
-4. 进行与训练对齐的预处理
-5. 调用训练好的 `pipeline` 输出概率与类别
-6. 做置信度阈值与历史平滑，实时更新界面
+## 4. 决策顺序
 
-## 运行前校验
+每个滑窗按顺序执行：
 
-连接与启动前会检查：
-- 非 Synthetic 板卡时串口不能为空
-- `board_channel_positions`（如果配置）长度需和模型通道数一致
-- `board_channel_positions` 不能有负数和重复索引
-- 板卡可用 EEG 通道数必须满足模型所需通道数
+1. 信号质量规则（flatline/异常通道）
+2. artifact rejector（若模型中可用）
+3. control gate（若模型中可用）
+4. 主 MI 分类
+5. 平滑、迟滞、释放逻辑
 
-## 可选配置
+## 5. 关键配置（`mi_realtime_infer_only.py`）
 
-可在 `USER_CONFIG` 修改默认值：
-- `serial_port`
-- `board_id`
-- `step_sec`
-- `history_len`
-- `confidence_threshold`
-- `board_channel_positions`（可选）
+常用项：
 
+- `model_path`
+- `realtime_mode`
+- `step_sec`, `history_len`
+- `confidence_threshold`, `margin_threshold`
+- `gate_confidence_threshold`, `gate_margin_threshold`
+- `use_artifact_recommended_thresholds`
+- `use_artifact_recommended_gate_thresholds`
+- `board_id`, `serial_port`
+- `board_channel_positions`
+
+### 重要约束
+
+非 `SYNTHETIC_BOARD` 时：
+
+1. `serial_port` 不能为空
+2. 必须显式设置 `board_channel_positions`
+3. `board_channel_positions` 长度必须等于模型通道数
+4. 位置索引不能重复、不能为负
+
+## 6. 常见状态显示
+
+- `WARMING UP`
+- `BAD WINDOW/ARTIFACT`
+- `NO CONTROL`
+- `LEFT HAND / RIGHT HAND / FEET / TONGUE`
+- `UNCERTAIN`
+
+## 7. 常见问题
+
+### 7.1 启动时报 board_channel_positions 错误
+
+按模型通道顺序设置显式索引，例如 8 通道可设为：
+
+```python
+"board_channel_positions": [0,1,2,3,4,5,6,7]
+```
+
+### 7.2 输出总是 UNCERTAIN
+
+先检查：
+
+1. 是否启用了推荐阈值
+2. 训练数据和实时通道顺序是否一致
+3. 实时信号质量是否频繁触发坏窗冻结
+
+### 7.3 一直显示 NO CONTROL
+
+通常是 gate 判定未通过。先看训练摘要里 gate 是否启用，以及推荐 gate 阈值是否过严。

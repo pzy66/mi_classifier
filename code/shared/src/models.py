@@ -108,30 +108,214 @@ def _resolve_channel_indices(
     return resolved
 
 
-def _probability_like_matrix(model, X: np.ndarray, class_count: int) -> np.ndarray:
+def _normalize_probability_rows(probabilities: np.ndarray) -> np.ndarray:
+    """Normalize a probability matrix row-wise and replace invalid rows with uniform uncertainty."""
+    matrix = np.asarray(probabilities, dtype=np.float64)
+    if matrix.ndim == 1:
+        matrix = matrix[np.newaxis, :]
+    if matrix.ndim != 2:
+        raise ValueError(f"Expected a 2D probability matrix, got shape {matrix.shape}.")
+    if matrix.shape[1] <= 0:
+        raise ValueError("Probability matrix must contain at least one class column.")
+
+    matrix = np.nan_to_num(matrix, nan=0.0, posinf=0.0, neginf=0.0)
+    matrix = np.clip(matrix, a_min=0.0, a_max=None)
+    row_sums = np.sum(matrix, axis=1, keepdims=True)
+    invalid_rows = row_sums <= 0.0
+    if np.any(invalid_rows):
+        matrix[invalid_rows[:, 0]] = 1.0
+        row_sums = np.sum(matrix, axis=1, keepdims=True)
+    return matrix / row_sums
+
+
+def _softmax_rows(scores: np.ndarray) -> np.ndarray:
+    """Apply a numerically stable row-wise softmax."""
+    matrix = np.asarray(scores, dtype=np.float64)
+    if matrix.ndim == 1:
+        matrix = matrix[np.newaxis, :]
+    if matrix.ndim != 2:
+        raise ValueError(f"Expected a 2D score matrix, got shape {matrix.shape}.")
+    if matrix.shape[1] <= 0:
+        raise ValueError("Score matrix must contain at least one class column.")
+
+    matrix = np.nan_to_num(matrix, nan=0.0, posinf=0.0, neginf=0.0)
+    shifted = matrix - np.max(matrix, axis=1, keepdims=True)
+    exponentiated = np.exp(np.clip(shifted, a_min=-60.0, a_max=60.0))
+    row_sums = np.sum(exponentiated, axis=1, keepdims=True)
+    invalid_rows = row_sums <= 0.0
+    if np.any(invalid_rows):
+        exponentiated[invalid_rows[:, 0]] = 1.0
+        row_sums = np.sum(exponentiated, axis=1, keepdims=True)
+    return exponentiated / row_sums
+
+
+def _coerce_decision_matrix(decision_values: np.ndarray, class_count: int) -> np.ndarray | None:
+    """Normalize raw decision outputs into an (n_samples, n_classes) score matrix."""
+    matrix = np.asarray(decision_values, dtype=np.float64)
+    if matrix.ndim == 1:
+        matrix = matrix.reshape(-1, 1)
+    if matrix.ndim != 2:
+        return None
+    if matrix.shape[1] == int(class_count):
+        return np.nan_to_num(matrix, nan=0.0, posinf=0.0, neginf=0.0)
+    if int(class_count) == 2 and matrix.shape[1] == 1:
+        zeros = np.zeros((matrix.shape[0], 1), dtype=np.float64)
+        return np.concatenate([zeros, matrix], axis=1)
+    return None
+
+
+def _apply_temperature_to_probabilities(probabilities: np.ndarray, temperature: float) -> np.ndarray:
+    """Apply temperature scaling to a probability matrix via log-probability reparameterization."""
+    normalized = _normalize_probability_rows(probabilities)
+    safe_temperature = max(float(temperature), 1e-6)
+    log_probabilities = np.log(np.clip(normalized, 1e-8, 1.0))
+    return _softmax_rows(log_probabilities / safe_temperature)
+
+
+def _negative_log_likelihood(probabilities: np.ndarray, y_true: np.ndarray) -> float:
+    """Compute multiclass negative log-likelihood from class probabilities."""
+    normalized = _normalize_probability_rows(probabilities)
+    labels = np.asarray(y_true, dtype=np.int64).reshape(-1)
+    if normalized.shape[0] != labels.shape[0]:
+        raise ValueError(
+            f"Probability rows ({normalized.shape[0]}) do not match labels ({labels.shape[0]})."
+        )
+    if normalized.shape[0] == 0:
+        return 0.0
+    clipped = np.clip(normalized[np.arange(labels.shape[0]), labels], 1e-8, 1.0)
+    return float(-np.mean(np.log(clipped)))
+
+
+def fit_probability_calibration(
+    probabilities: np.ndarray,
+    y_true: np.ndarray,
+    *,
+    calibration_type: str = "temperature_scaling",
+    role: str | None = None,
+    selection_source: str | None = None,
+) -> dict[str, object]:
+    """Fit a lightweight post-hoc probability calibration object from validation probabilities."""
+    normalized = _normalize_probability_rows(probabilities)
+    labels = np.asarray(y_true, dtype=np.int64).reshape(-1)
+    if normalized.shape[0] != labels.shape[0]:
+        raise ValueError(
+            f"Calibration probabilities ({normalized.shape[0]}) do not match labels ({labels.shape[0]})."
+        )
+
+    calibration_name = str(calibration_type).strip().lower()
+    if calibration_name != "temperature_scaling":
+        raise ValueError(f"Unsupported probability calibration type: {calibration_type}")
+
+    baseline_nll = _negative_log_likelihood(normalized, labels)
+    best_temperature = 1.0
+    best_nll = baseline_nll
+
+    if normalized.shape[0] > 0 and normalized.shape[1] > 1:
+        lower = 0.25
+        upper = 4.0
+        for _ in range(3):
+            grid = np.geomspace(lower, upper, num=25)
+            losses = [
+                _negative_log_likelihood(
+                    _apply_temperature_to_probabilities(normalized, float(temperature)),
+                    labels,
+                )
+                for temperature in grid
+            ]
+            best_index = int(np.argmin(losses))
+            candidate_temperature = float(grid[best_index])
+            candidate_nll = float(losses[best_index])
+            if candidate_nll < best_nll:
+                best_temperature = candidate_temperature
+                best_nll = candidate_nll
+
+            if best_index == 0:
+                lower = max(lower / 2.0, 0.05)
+                upper = float(grid[min(1, len(grid) - 1)])
+            elif best_index == len(grid) - 1:
+                lower = float(grid[max(len(grid) - 2, 0)])
+                upper = min(upper * 2.0, 20.0)
+            else:
+                lower = float(grid[best_index - 1])
+                upper = float(grid[best_index + 1])
+
+    calibrated = _apply_temperature_to_probabilities(normalized, best_temperature)
+    summary = {
+        "type": calibration_name,
+        "temperature": float(best_temperature),
+        "sample_count": int(labels.shape[0]),
+        "class_count": int(normalized.shape[1]),
+        "nll_before": float(baseline_nll),
+        "nll_after": float(_negative_log_likelihood(calibrated, labels)),
+        "mean_confidence_before": float(np.mean(np.max(normalized, axis=1))) if normalized.shape[0] else 0.0,
+        "mean_confidence_after": float(np.mean(np.max(calibrated, axis=1))) if calibrated.shape[0] else 0.0,
+    }
+    if role is not None:
+        summary["role"] = str(role)
+    if selection_source is not None:
+        summary["selection_source"] = str(selection_source)
+    return summary
+
+
+def apply_probability_calibration(
+    probabilities: np.ndarray,
+    probability_calibration: dict[str, object] | None = None,
+) -> np.ndarray:
+    """Apply an exported probability calibration object to a 1D or 2D probability matrix."""
+    matrix = np.asarray(probabilities, dtype=np.float64)
+    squeeze_output = matrix.ndim == 1
+    normalized = _normalize_probability_rows(matrix)
+
+    if not probability_calibration:
+        return normalized[0] if squeeze_output else normalized
+
+    calibration_type = str(probability_calibration.get("type", "")).strip().lower()
+    if calibration_type == "temperature_scaling":
+        temperature = float(probability_calibration.get("temperature", 1.0))
+        calibrated = _apply_temperature_to_probabilities(normalized, temperature)
+    else:
+        calibrated = normalized
+
+    return calibrated[0] if squeeze_output else calibrated
+
+
+def _probability_like_matrix(
+    model,
+    X: np.ndarray,
+    class_count: int,
+    probability_calibration: dict[str, object] | None = None,
+) -> np.ndarray:
     """Convert model outputs into an (n_samples, n_classes) probability-like matrix."""
     if hasattr(model, "predict_proba"):
         probabilities = np.asarray(model.predict_proba(X), dtype=np.float64)
         if probabilities.ndim == 2 and probabilities.shape[1] == class_count:
-            probabilities = np.nan_to_num(probabilities, nan=0.0, posinf=0.0, neginf=0.0)
-            row_sums = np.sum(probabilities, axis=1, keepdims=True)
-            row_sums[row_sums <= 0.0] = 1.0
-            return probabilities / row_sums
+            return apply_probability_calibration(probabilities, probability_calibration)
 
     if hasattr(model, "decision_function"):
-        decision_values = np.asarray(model.decision_function(X), dtype=np.float64)
-        decision_values = np.atleast_2d(decision_values)
-        if decision_values.shape[1] == class_count:
-            shifted = decision_values - np.max(decision_values, axis=1, keepdims=True)
-            exponentiated = np.exp(shifted)
-            row_sums = np.sum(exponentiated, axis=1, keepdims=True)
-            row_sums[row_sums <= 0.0] = 1.0
-            return exponentiated / row_sums
+        decision_matrix = _coerce_decision_matrix(model.decision_function(X), class_count)
+        if decision_matrix is not None:
+            probabilities = _softmax_rows(decision_matrix)
+            return apply_probability_calibration(probabilities, probability_calibration)
 
     predictions = np.asarray(model.predict(X), dtype=np.int64).reshape(-1)
     fallback = np.zeros((predictions.shape[0], class_count), dtype=np.float64)
     fallback[np.arange(predictions.shape[0]), predictions] = 1.0
-    return fallback
+    return apply_probability_calibration(fallback, probability_calibration)
+
+
+def predict_probability_matrix(
+    model,
+    X: np.ndarray,
+    class_count: int,
+    probability_calibration: dict[str, object] | None = None,
+) -> np.ndarray:
+    """Public wrapper used by training / realtime code to obtain calibrated class probabilities."""
+    return _probability_like_matrix(
+        model,
+        X,
+        class_count,
+        probability_calibration=probability_calibration,
+    )
 
 
 def _align_probability_columns(

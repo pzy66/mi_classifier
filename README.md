@@ -1,59 +1,17 @@
 ﻿# MI Classifier（四类 MI + Gate + Bad-Window + Continuous）
 
-本项目只做 `MI`（不含 SSVEP）。
+本项目只做运动想象（MI），不包含 SSVEP。
 
-目标不是只在离线 trial 上拿高分，而是把完整链路做对：
+目标不是只做离线分类分数，而是完成可部署链路：
 
-1. 采集规范的四类 MI 主数据
-2. 单独采集 no-control/idle 数据
-3. 单独采集伪迹/坏窗数据
-4. 采集 continuous 数据做仿实时验证
-5. 训练三类模型（主分类、gate、bad-window rejector）
-6. 实时按顺序执行：`bad-window -> gate -> 主分类`
+1. 采集四类 MI 主任务数据（left/right/feet/tongue）
+2. 采集 no-control（idle/prepare 等）数据用于 gate
+3. 采集伪迹/坏窗数据用于 rejector
+4. 采集 continuous 连续数据用于仿实时评估
+5. 训练主分类 + gate + artifact rejector
+6. 实时按顺序执行：`bad-window -> gate -> main classifier`
 
----
-
-## 1. 全链路总览
-
-```text
-采集（单 session）
-  -> 保存（按被试/会话/运行编号）
-  -> 数据分流（MI / gate / artifact / continuous）
-  -> 训练（主模型 + gate + rejector + 阈值）
-  -> continuous 仿实时评估
-  -> 实时部署（拒判优先，分类在后）
-```
-
-四条数据线的用途：
-
-- 主 4 类 MI：训练 `left_hand/right_hand/feet/tongue` 主分类器
-- gate：训练 `control vs no-control`
-- bad-window：训练 `clean vs artifact`
-- continuous：评估误触发、延迟、稳定性（默认不参与主分类训练）
-
----
-
-## 2. 入口脚本
-
-根目录推荐入口：
-
-- `run_01_collection_only.py`：采集 UI
-- `run_02_training.py`：训练与导出工件
-- `run_03_realtime_infer.py`：实时推理 UI
-- `run_04_view_collected_npz.py`：查看采集缓存
-- `run_05_channel_monitor.py`：8 通道波形监视（可选）
-
-也可以直接调用对应子脚本：
-
-- `code/collection/mi_data_collector.py`
-- `code/training/train_custom_dataset.py`
-- `code/realtime/mi_realtime_infer_only.py`
-
----
-
-## 3. 环境准备
-
-建议使用 `MI` conda 环境。
+## 1. 快速开始（推荐）
 
 ```powershell
 conda activate MI
@@ -61,197 +19,145 @@ pip install -r requirements.txt
 pip install -r requirements-realtime.txt
 ```
 
-如果要训练深度候选（FBLight/dual-branch 等），额外安装：
+可选（训练深度候选）：
 
 ```powershell
 pip install -r requirements-deep.txt
 ```
 
-如果你的终端没有 `python` 命令，直接使用解释器绝对路径，例如：
+三步跑通：
 
 ```powershell
-& 'C:\Users\P1233\miniconda3\envs\MI\python.exe' run_01_collection_only.py
+python run_01_collection_only.py
+python run_02_training.py
+python run_03_realtime_infer.py
 ```
 
----
+查看采集 npz：
 
-## 4. 采集流程（当前实现）
+```powershell
+python run_04_view_collected_npz.py
+```
 
-### 4.1 固定通道约束（强校验）
+8 通道在线波形监视（可选）：
 
-采集端固定 8 通道，且顺序必须一致：
+```powershell
+python run_05_channel_monitor.py
+```
+
+## 2. 目录与入口
+
+```text
+mi_classifier/
+|-- code/
+|   |-- collection/    # 采集 UI
+|   |-- training/      # 训练脚本
+|   |-- realtime/      # 实时推理 UI
+|   |-- viewer/        # npz 可视化
+|   |-- shared/        # 公共逻辑
+|   `-- legacy/        # 历史代码（不参与当前主流程）
+|-- datasets/
+|   `-- custom_mi/     # 自采数据根目录
+|-- run_01_collection_only.py
+|-- run_02_training.py
+|-- run_03_realtime_infer.py
+|-- run_04_view_collected_npz.py
+|-- run_05_channel_monitor.py
+`-- README.md
+```
+
+## 3. 采集规范（必须对齐训练）
+
+### 3.1 固定通道约束
+
+采集端强校验固定 8 通道、固定顺序：
 
 - `C3, Cz, C4, PO3, PO4, O1, Oz, O2`
+- `channel_positions = 0,1,2,3,4,5,6,7`
 
-在 UI 里如果不是这个名称顺序，或位置不是 `0,1,2,3,4,5,6,7`，程序会直接报错阻止开始采集。
+不满足会阻止开始采集。
 
-### 4.2 单窗口 UI（默认）
+### 3.2 默认流程顺序
 
-当前默认是**单窗口运行**，不自动弹出受试者全屏窗口。
+每次会话按以下阶段推进：
 
-- `use_separate_participant_screen = False`
-- 所有关键提示都在主界面展示
-- 支持窗口缩放与自适应重排（2/3/4 列）
+1. `quality_check`
+2. `calibration`（open/closed/eye/blink/swallow/jaw/head）
+3. `practice`
+4. `MI runs`
+5. `idle_block`
+6. `idle_prepare`
+7. `continuous`
+8. 保存导出
 
-### 4.3 采集阶段顺序
+### 3.3 默认关键参数
 
-每次会话按这个顺序推进：
+- 主 trial：`baseline=2.0s, cue=1.0s, imagery=4.0s, iti=2.5s`
+- run：`trials_per_class=10, run_count=4`
+- run 休息：`90s`，每 2 个 run 长休 `180s`
+- quality_check：`45s`
+- calibration：`120/60/60/30/30/30/30s`
+- practice：`180s`
+- idle：`2 x 90s`
+- prepare：`1 x 90s`
+- continuous：`2 x 150s`，命令 `3-6s`，间隔 `1-3s`
 
-1. `quality_check`（质量检查）
-2. `calibration`（静息/伪迹校准）
-3. `practice`（想象方式练习）
-4. `MI runs`（主任务，多 run）
-5. `idle_block`（无控制）
-6. `idle_prepare`（准备但不执行）
-7. `continuous`（仿实时连续块）
-8. 保存并导出多份文件
+### 3.4 单/双窗口说明
 
-### 4.4 关键默认参数（采集 UI 默认值）
+当前默认 `use_separate_participant_screen = True`（双窗口，受试者全屏提示）。
 
-#### 主 trial
+如果你想单窗口运行，可在采集 UI 中关闭该选项。
 
-- `baseline_sec = 2.0`
-- `cue_sec = 1.0`
-- `imagery_sec = 4.0`
-- `iti_sec = 2.5`
-
-即：`2.0 + 1.0 + 4.0 + 2.5 = 9.5s / trial`
-
-关键约束（很重要）：
-
-- 训练默认配置要求：`imagery_sec >= max(window_secs) + max(window_offset_secs)`  
-  默认即 `imagery_sec >= 3.75s`（`3.0 + 0.75`）
-- 因此采集端建议把 `imagery_sec` 保持在 `4.0s` 或更高；如果你把 imagery 改短，训练时必须同步下调 `--window-secs` / `--window-offset-secs`
-
-#### run 结构
-
-- `trials_per_class = 10`
-- `run_count = 4`
-- 每 run 共 `40 trial`，4 类均衡
-- `max_consecutive_same_class = 2`
-- run 间休息 `90s`
-- 每 `2` 个 run 后长休息 `180s`
-
-#### 校准与附加块
-
-- 质量检查：`45s`
-- 睁眼静息：`120s`
-- 闭眼静息：`60s`
-- 眼动：`60s`
-- 眨眼：`30s`
-- 吞咽：`30s`
-- 咬牙：`30s`
-- 头动：`30s`
-- MI 练习：`180s`
-- idle 段：`2 x 90s`
-- prepare-no-exec：`1 x 90s`（可改段数）
-- continuous：`2 x 150s`
-  - 命令时长：`3-6s`
-  - 间隔：`1-3s`
-
-### 4.5 会话元数据（已更新）
-
-会话保存时记录：
-
-- 被试编号/名称、会话编号、板卡、串口、采样率、参考设置
-- 被试状态、咖啡/茶、近期运动、睡眠备注、备注
-- 自动随机种子（每次开始采集自动生成并保存）
-
-不再保存 `operator` 字段。
-
-### 4.6 快捷键与标记
-
-采集中快捷键：
+### 3.5 快捷键
 
 - `Space`：暂停/继续
 - `B`：
-  - 在主 trial 阶段：标记坏试次
-  - 在 continuous 阶段：标记“当前命令执行失败”
+  - trial 阶段：标记坏试次
+  - continuous 阶段：标记当前命令执行失败（`execution_success=0`）
 - `Esc`：停止并保存
 
-continuous 命令失败会写入 `execution_success=0`（用于后续分析）。
+### 3.6 保存结构与文件
 
----
-
-## 5. 保存结构与文件含义
-
-### 5.1 保存路径（按被试分目录）
-
-每次保存路径：
+每次保存到：
 
 ```text
-datasets/custom_mi/
-  sub-<被试编号或姓名>/
-    ses-<会话编号>/
-      sub-..._ses-..._run-001_tpc-10_n-160_ok-154_*.xxx
+datasets/custom_mi/sub-<subject>/ses-<session>/
 ```
 
-说明：
+每次 run 自动生成带编号文件名前缀（run stem），例如：
 
-- `sub-...` 支持中文名（会自动做文件名安全处理）
-- 同一会话下多次保存会自动递增 `run-001/run-002/...`
+```text
+sub-001_ses-20260331_203000_run-001_tpc-10_n-160_ok-154
+```
 
-### 5.2 每次会话保存导出文件
+核心输出文件：
 
-会导出以下核心文件：
+- `*_raw.fif`
+- `*_events.csv`
+- `*_trials.csv`
+- `*_session_meta.json`
+- `*_quality_report.json`
+- `*_mi_epochs.npz`
+- `*_gate_epochs.npz`
+- `*_artifact_epochs.npz`
+- `*_continuous.npz`
+- `*_epochs.npz`（legacy，可选）
 
-- `*_raw.fif`：连续原始 EEG（含注释）
-- `*_events.csv`：事件日志（含 marker、sample、block/prompt 等）
-- `*_trials.csv`：trial 级记录（accepted/rejected）
-- `*_session_meta.json`：会话元数据与统计
-- `*_quality_report.json`：信号质量摘要
-- `*_mi_epochs.npz`：主 4 类训练数据
-- `*_gate_epochs.npz`：gate 训练数据
-- `*_artifact_epochs.npz`：bad-window 训练数据
-- `*_continuous.npz`：continuous 仿实时数据
-- `*_epochs.npz`：legacy 兼容包（可在 UI 勾选）
+数据根目录会维护：
 
-此外在数据根目录追加：
+- `collection_manifest.csv`
 
-- `collection_manifest.csv`：全局采集清单
+旧表头会自动迁移并备份为 `*_legacy_schema_*.csv`。
 
-说明：
+## 4. 训练说明
 
-- 若检测到旧版 manifest 表头（如 `artifact_npz`、`imagery_style` 等），程序会先自动迁移到新字段并保留一个 `*_legacy_schema_*.csv` 备份，再继续追加新记录。
+训练入口：`python run_02_training.py`（实际调用 `code/training/train_custom_dataset.py`）。
 
-### 5.3 四类数据如何落盘
+### 4.1 训练读取数据
 
-#### 1) 主分类数据（`*_mi_epochs.npz`）
+默认扫描：`datasets/custom_mi`
 
-- `X_mi, y_mi, mi_trial_ids`
-- 只包含 accepted imagery 窗口
-
-#### 2) gate 数据（`*_gate_epochs.npz`）
-
-- 正类：`X_gate_pos`（MI 窗口）
-- 负类：`X_gate_neg`（baseline/iti/idle/prepare/continuous no_control 等）
-- 硬负类：`X_gate_hard_neg`（伪迹块、rejected trial 等）
-- 来源标签：`gate_neg_sources, gate_hard_neg_sources`
-
-闭眼静息默认**不加入** gate 负类，勾选“闭眼静息加入门控负类”后才会加入。
-
-#### 3) bad-window 数据（`*_artifact_epochs.npz`）
-
-- `X_artifact`：伪迹/坏窗样本
-- `artifact_labels`：伪迹标签来源
-
-训练时会和 clean 负类组合成二分类（good vs artifact）。
-
-#### 4) continuous 数据（`*_continuous.npz`）
-
-- `X_continuous`：连续块信号
-- `continuous_event_labels/start/end_samples`
-- `continuous_events`（JSON 字符串数组，含 prompt、class、execution_success 等）
-
----
-
-## 6. 训练流程（`run_02_training.py`）
-
-训练入口：`code/training/train_custom_dataset.py`
-
-### 6.1 输入文件扫描
-
-训练会递归扫描 `--dataset-root`（默认 `datasets/custom_mi`），优先使用新格式：
+优先读取新格式：
 
 - `*_mi_epochs.npz`
 - `*_gate_epochs.npz`
@@ -262,293 +168,93 @@ datasets/custom_mi/
 
 - `*_epochs.npz` / `epochs.npz`
 
-目录层级兼容：
+### 4.2 三条模型线
 
-- 新结构：`sub-<id>/ses-<id>/...`
-- 旧结构：`ses-<id>/...`
-- 训练会同时识别两种结构。
+- 主分类：4 类 MI
+- gate：`control` vs `no-control`
+- artifact rejector：`clean` vs `artifact`
 
-### 6.2 数据分流与任务
+continuous 数据只用于 online-like 评估，不直接并入主分类训练。
 
-- 主模型（4 类）：用 `mi` 数据
-- gate（二分类）：`X_gate_pos` vs `X_gate_neg + X_gate_hard_neg`
-- bad-window（二分类）：`X_artifact` vs clean negatives
-- continuous：仅做仿实时评估
+### 4.3 关键默认训练参数
 
-补充：
+- 预处理：`4-40Hz` 带通 + `50Hz` 陷波 + `CAR`
+- 窗口：`window_secs=2.0,2.5,3.0`
+- offset：`window_offset_secs=0.25,0.5,0.75`
 
-- `X_gate_hard_neg` 可以为空（例如本次没标坏试次/伪迹段不足），训练流程会自动兼容。
+重要约束：
 
-### 6.3 切分策略（防泄漏）
+- 需满足 `imagery_sec >= max(window_secs) + max(window_offset_secs)`
+- 默认即至少 `3.75s`，建议采集用 `4.0s` 或以上
 
-优先使用分组切分（按 run/session），策略顺序：
+### 4.4 默认输出
 
-1. `session_holdout`
-2. `group_shuffle`
-3. `trial_stratified_fallback`（最后兜底）
+- 模型：`code/realtime/models/custom_mi_realtime.joblib`
+- 训练摘要：`code/training/reports/custom_mi_training_summary.json`
+- 旁路摘要：`code/realtime/models/custom_mi_realtime.json`
 
-当 run 太少回退到 trial 级切分时，CLI 会打印 warning，需谨慎解读离线分数。
+## 5. 实时说明
 
-### 6.4 预处理（训练/实时一致）
+实时入口：`python run_03_realtime_infer.py`。
 
-- 带通：`4-40 Hz`
-- 陷波：`50 Hz`
-- `CAR`
-- 不做窗级标准化（`standardize_data=False`）
+每个滑窗决策顺序：
 
-### 6.5 默认窗口与 offset
+1. 质量规则（flatline/异常通道）
+2. artifact rejector（如可用）
+3. control gate（如可用）
+4. 主分类
+5. 平滑与迟滞
 
-- `window_secs = 2.0,2.5,3.0`
-- `window_offset_secs = 0.25,0.5,0.75`
+常见状态：
 
-用于多窗口融合与 offset 搜索。
+- `WARMING UP`
+- `BAD WINDOW/ARTIFACT`
+- `NO CONTROL`
+- `LEFT HAND / RIGHT HAND / FEET / TONGUE`
+- `UNCERTAIN`
 
-### 6.6 默认候选模型
+非 synthetic 板卡必须设置 `board_channel_positions`，且顺序必须与训练通道一致。
 
-#### 主分类默认（保守）
+## 6. 推荐 SOP
 
-- `central_fbcsp_lda`
+1. 采集：每位被试至少 3 个不同日期 session，完整跑完所有阶段。
+2. 训练：先用默认参数训练并检查 `control_gate` / `artifact_rejector` 是否启用。
+3. 实时：优先使用工件推荐阈值（默认开启）。
+4. 回看：用 viewer 检查类别平衡、坏窗比例、continuous 标注质量。
 
-#### gate 默认
+## 7. 常见问题
 
-- 有 torch：`central_gate_fblight`, `central_prior_gate_fblight`
-- 无 torch：回退 classical 候选
+### 7.1 训练报窗口超界（imagery 长度不足）
 
-#### bad-window 默认
+含义：训练窗口和 offset 超过采集到的 imagery 有效长度。
 
-- 有 torch：`full8_fblight`
-- 无 torch：回退 classical 候选
+处理：
 
-可通过 CLI 覆盖，例如：
+1. 重新采集并增大 `imagery_sec`（建议 `>=4.0s`）
+2. 或训练时下调 `--window-secs` / `--window-offset-secs`
 
-```powershell
-python code/training/train_custom_dataset.py `
-  --candidate-names central_fbcsp_lda,central_prior_dual_branch_fblight_tcn `
-  --gate-candidate-names central_gate_fblight,central_prior_gate_fblight `
-  --artifact-candidate-names full8_fblight
-```
+### 7.2 实时报 `board_channel_positions` 错误
 
-### 6.7 阈值与输出字段
+在 `code/realtime/mi_realtime_infer_only.py` 的 `USER_CONFIG` 中明确设置，长度和顺序需与模型通道一致。
 
-训练会为主模型、gate、artifact rejector分别给出推荐阈值：
+### 7.3 gate/artifact 未启用
 
-- `confidence_threshold`
-- `margin_threshold`
-- `recommended_threshold`（同值结构化复制）
+通常是对应数据不足或不平衡：
 
-并写明输出字段语义，例如：
+- 检查是否有 `*_gate_epochs.npz` / `*_artifact_epochs.npz`
+- 检查负类样本是否足够
+- 检查切分后是否出现单类集合
 
-- gate：`probability/margin/confidence`
-- artifact：`probability/margin/confidence`
+## 8. 子文档索引
 
-### 6.8 continuous 仿实时评估
+- `code/README.md`：代码目录总览
+- `code/collection/README.md`：采集模块
+- `code/collection/README_SAVE_NAMING.md`：命名与 manifest
+- `code/training/README.md`：训练模块
+- `code/training/README_DATA_LOADING.md`：训练装载规则
+- `code/realtime/README.md`：实时模块
+- `code/viewer/README.md`：可视化模块
+- `datasets/README.md`：数据目录说明
+- `datasets/custom_mi/README.md`：自采数据目录规范
 
-训练阶段会对 continuous 数据执行 online-like 评估，输出：
-
-- `evaluated_prompt_count`
-- `mi_prompt_accuracy`
-- `no_control_false_activation_rate`
-- `decision_order = [bad_window_rejector, control_gate, main_mi_classifier]`
-
-### 6.9 导出工件
-
-默认输出：
-
-- 模型工件：`code/realtime/models/custom_mi_realtime.joblib`
-- 报告：`code/training/reports/custom_mi_training_summary.json`
-- 旁路 JSON：`custom_mi_realtime.json`
-
-CLI 会打印：
-
-- 主模型指标（acc/macro_f1/kappa）
-- gate/artifact 是否启用
-- 推荐阈值
-- continuous 指标摘要
-
----
-
-## 7. 实时推理流程（`run_03_realtime_infer.py`）
-
-实时入口：`code/realtime/mi_realtime_infer_only.py`
-
-### 7.1 实时决策顺序
-
-每个滑窗按顺序执行：
-
-1. 坏窗与质量判断（flatline/异常通道等）
-2. `artifact rejector`（若训练可用）
-3. `control gate`（若训练可用）
-4. 主 4 类分类
-5. 平滑 + 迟滞 + hold/release
-
-即：先拒判，再判 control，再做四分类。
-
-### 7.2 输出状态（常见）
-
-- `WARMING UP`：窗口长度尚不足
-- `NO CONTROL`：gate 拒绝
-- `BAD WINDOW/ARTIFACT`：质量或 rejector 拒绝
-- 稳定类别：`LEFT HAND/RIGHT HAND/FEET/TONGUE`
-- `UNCERTAIN`：证据不足（尤其在无 gate 工件时）
-
-### 7.3 关键配置（`USER_CONFIG`）
-
-重点项：
-
-- `realtime_mode`: `continuous` / `guided`
-- `model_path`
-- `use_artifact_recommended_thresholds`
-- `use_artifact_recommended_gate_thresholds`
-- `step_sec`, `history_len`
-- `confidence_threshold`, `margin_threshold`
-- `gate_confidence_threshold`, `gate_margin_threshold`
-- `release_windows`, `gate_release_windows`
-- `artifact_freeze_windows`
-- `board_channel_positions`
-
-重要：真实板卡模式下必须正确设置 `board_channel_positions`，并与训练通道顺序一致。
-
----
-
-## 8. 推荐执行 SOP（建议）
-
-### 第一步：采集
-
-```powershell
-python run_01_collection_only.py
-```
-
-建议：
-
-- 至少 3 个不同日期 session
-- 每次完整执行全部阶段（含 idle/artifact/continuous）
-- 采完立刻检查 `*_mi/_gate/_artifact/_continuous` 是否齐全
-
-### 第二步：训练
-
-```powershell
-python run_02_training.py
-```
-
-或只训练指定被试：
-
-```powershell
-python code/training/train_custom_dataset.py --subject 001
-```
-
-### 第三步：实时
-
-```powershell
-python run_03_realtime_infer.py
-```
-
-优先使用工件内推荐阈值（默认已开启）。
-
----
-
-## 9. 采集后质控清单（每个 session）
-
-至少检查以下项目：
-
-1. 文件完整性
-   - `*_mi_epochs.npz`
-   - `*_gate_epochs.npz`
-   - `*_artifact_epochs.npz`
-   - `*_continuous.npz`
-   - `*_session_meta.json`
-2. 类别平衡
-   - 主任务 4 类是否均衡
-   - accepted/rejected 比例是否异常
-3. gate 负类来源
-   - `gate_neg_sources` 是否覆盖 baseline/iti/idle/prepare/continuous
-4. bad-window 样本
-   - `artifact_labels` 是否包含 blink/eye/swallow/jaw/head 等
-5. continuous 标注
-   - prompt 起止时间、类别、execution_success 是否合理
-
----
-
-## 10. 常见问题排查
-
-### 10.1 UI 字显示不全
-
-- 已实现自适应 2/3/4 列布局
-- 先尝试放大窗口（建议 >= 1500px 宽）
-- 系统缩放过高时可适当降低显示缩放
-
-### 10.2 实时报 `board_channel_positions` 错误
-
-- 在 `code/realtime/mi_realtime_infer_only.py` 的 `USER_CONFIG` 中设置正确索引
-- 顺序必须和训练时一致（默认 8 通道顺序）
-
-### 10.3 训练显示 gate/artifact 不可用
-
-通常是数据不足或文件缺失：
-
-- 检查是否存在 `*_gate_epochs.npz` / `*_artifact_epochs.npz`
-- 检查负类是否太少
-- 检查 split 后某个集合是否缺类
-
-### 10.4 continuous 指标不可用
-
-- 检查 `*_continuous.npz` 是否存在
-- 检查 prompt 标注数量是否为 0
-
-### 10.5 训练报错 `Requested windows ... exceed available ... imagery epoch`
-
-含义：采集得到的 imagery 有效长度不足以覆盖训练窗口+offset。
-
-- 默认训练约束是 `imagery_sec >= 3.75s`
-- 解决办法二选一：
-  1. 重新采集时把 `imagery_sec` 提高（建议 `>=4.0s`）
-  2. 训练时下调 `--window-secs` 和/或 `--window-offset-secs`
-
----
-
-## 11. 目录说明
-
-```text
-mi_classifier/
-|-- code/
-|   |-- collection/      # 采集 UI
-|   |-- realtime/        # 实时推理 UI
-|   |-- shared/          # 采集/训练/实时共用逻辑
-|   |-- training/        # 训练脚本、报告
-|   `-- viewer/          # npz 查看工具
-|-- datasets/
-|   `-- custom_mi/       # 自采数据根目录
-|-- runtime/             # 运行期缓存（如 mne home）
-|-- run_01_collection_only.py
-|-- run_02_training.py
-|-- run_03_realtime_infer.py
-|-- run_04_view_collected_npz.py
-|-- run_05_channel_monitor.py
-`-- README.md
-```
-
----
-
-## 12. 关键代码索引
-
-采集：
-
-- `code/collection/mi_data_collector.py`
-- `code/shared/src/mi_collection.py`
-
-训练：
-
-- `code/training/train_custom_dataset.py`
-- `code/shared/src/models.py`
-
-实时：
-
-- `code/realtime/mi_realtime_infer_only.py`
-- `code/shared/src/realtime_mi.py`
-
-查看：
-
-- `code/viewer/mi_npz_viewer.py`
-
----
-
-如果你后续改了采集参数（例如 trial 时长、run 数、continuous 时长），请同步修改本 README 对应章节，避免“代码与文档不一致”。
+如果你修改了采集或训练参数，请同步更新对应 README，避免“代码与文档不一致”。

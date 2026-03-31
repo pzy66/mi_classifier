@@ -1,42 +1,85 @@
-# 采集保存命名规则（新增）
+﻿# 采集保存命名规则
 
-为了解决“多次采集文件难区分”的问题，采集模块现在会自动使用**带编号**的文件名。
+本文件说明 `code/shared/src/mi_collection.py` 的实际落盘命名与索引规则。
 
-## 新命名格式
+## 1. run-stem 命名格式
 
-每次停止并保存后，会在当前 `sub-xxx/ses-xxx/` 下生成一组同前缀文件：
+每次保存都会生成统一前缀（run stem）：
 
-`sub-<subject>_ses-<session>_run-<编号>_tpc-<每类试次数>_n-<本次总试次>_ok-<本次有效试次>_<类型后缀>`
+```text
+sub-<subject>_ses-<session>_run-<NNN>_tpc-<TT>_n-<NNN>_ok-<NNN>
+```
+
+字段含义：
+
+- `run-<NNN>`：同一 `subject/session` 下第几次保存（自动递增）
+- `tpc-<TT>`：`trials_per_class`
+- `n-<NNN>`：本次会话总 trial 数
+- `ok-<NNN>`：本次 accepted trial 数
 
 示例：
 
-- `sub-001_ses-20260329_210000_run-002_tpc-10_n-040_ok-038_epochs.npz`
-- `sub-001_ses-20260329_210000_run-002_tpc-10_n-040_ok-038_raw.fif`
-- `sub-001_ses-20260329_210000_run-002_tpc-10_n-040_ok-038_session_meta.json`
+```text
+sub-001_ses-20260331_203000_run-002_tpc-10_n-160_ok-154
+```
 
-## 字段含义
+## 2. 同一 run 的输出文件
 
-- `run-002`：同一 `subject/session` 下第 2 次采集
-- `tpc-10`：每类目标试次数（trials per class）
-- `n-040`：本次采集总试次
-- `ok-038`：本次有效试次
+以上面 run stem 为前缀，会生成：
 
-## 兼容性
+- `*_raw.fif`
+- `*_events.csv`
+- `*_trials.csv`
+- `*_session_meta.json`
+- `*_quality_report.json`
+- `*_mi_epochs.npz`
+- `*_gate_epochs.npz`
+- `*_artifact_epochs.npz`
+- `*_continuous.npz`
+- `*_epochs.npz`（可选 legacy）
 
-- 训练程序已兼容读取：
-  - 新格式：`*_epochs.npz`
-  - 旧格式：`epochs.npz`
-- 可视化程序也已兼容以上两种格式。
+## 3. 目录层级
 
-## 新增数据索引（推荐用于管理多次采集）
+```text
+datasets/custom_mi/
+`-- sub-<subject>/
+    `-- ses-<session>/
+        |-- <run_stem>_raw.fif
+        |-- <run_stem>_mi_epochs.npz
+        `-- ...
+```
 
-采集保存时会自动在 `output_root`（默认 `datasets/custom_mi`）下追加：
+`subject` 和 `session` 会做文件名安全化处理（允许输入中文，但落盘会转成安全 token）。
 
-- `collection_manifest.csv`
+## 4. 全局采集索引（manifest）
 
-每一行对应一次采集 run，包含：
+每次保存会追加到：
+
+- `datasets/custom_mi/collection_manifest.csv`
+
+当前 manifest 关键列包括：
+
+- `saved_at`
 - `subject_id / session_id / run_index / run_stem`
 - `trials_per_class / trial_count / accepted_trial_count / rejected_trial_count`
-- `epochs_npz / session_raw_fif / events_csv / trials_csv / session_meta_json`
+- `sampling_rate_hz / channel_names / class_names`
+- `mi_epochs_npz / gate_epochs_npz / artifact_epochs_npz / continuous_npz / epochs_npz`
+- `session_raw_fif / events_csv / trials_csv / session_meta_json`
 
-这样可以快速筛选“哪次采集可用于训练”，不需要手工翻目录。
+## 5. 旧版 manifest 兼容
+
+若检测到旧 schema：
+
+1. 旧文件会被自动备份为 `*_legacy_schema_<timestamp>.csv`
+2. 新文件按当前 schema 重建后继续追加
+
+因此可以直接升级，不需要手工改历史数据。
+
+## 6. 训练兼容性
+
+训练端兼容：
+
+- 新格式：`*_mi_epochs.npz` 等 task-specific 文件
+- 旧格式：`*_epochs.npz` / `epochs.npz`
+
+建议优先使用新格式，因为 gate/artifact/continuous 信息更完整。
