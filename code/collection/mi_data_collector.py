@@ -38,6 +38,11 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+try:
+    import winsound
+except ImportError:  # pragma: no cover - non-Windows fallback
+    winsound = None
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SHARED_ROOT = PROJECT_ROOT / "code" / "shared"
 if str(SHARED_ROOT) not in sys.path:
@@ -60,6 +65,10 @@ from src.mi_collection import (
 
 
 DEFAULT_CHANNEL_NAMES = ["C3", "Cz", "C4", "PO3", "PO4", "O1", "Oz", "O2"]
+IMAGERY_START_TONE_HZ = 1200
+IMAGERY_START_TONE_MS = 140
+IMAGERY_END_TONE_HZ = 800
+IMAGERY_END_TONE_MS = 180
 PHASE_LABELS = {
     "idle": "等待开始",
     "baseline": "准备阶段",
@@ -487,7 +496,7 @@ class ParticipantDisplayWindow(QWidget):
         layout.addWidget(self.stage_label)
 
         self.cue_widget = CueIllustrationWidget()
-        self.cue_widget.setMinimumHeight(700)
+        self.cue_widget.setMinimumHeight(360)
         layout.addWidget(self.cue_widget, stretch=1)
 
         self.countdown_label = QLabel("--")
@@ -981,6 +990,8 @@ class MIDataCollectorWindow(QMainWindow):
         self.continuous_prompt_plan: list[dict[str, object]] = []
         self.continuous_prompt_index = -1
         self.current_continuous_prompt: dict[str, object] | None = None
+        self.continuous_schedule_after_runs: list[int] = []
+        self.next_continuous_schedule_index = 0
         self.marker_failure_active = False
         self.marker_failure_message = ""
         self.config_panel_widget: QWidget | None = None
@@ -1404,7 +1415,7 @@ class MIDataCollectorWindow(QMainWindow):
         calibration_group = QGroupBox("静息/伪迹/训练")
         calibration_form = QFormLayout(calibration_group)
         self._configure_form_layout(calibration_form)
-        calibration_form.addRow("质量检查（秒）", self.quality_check_spin)
+        calibration_form.addRow("质量检查参考（秒）", self.quality_check_spin)
         calibration_form.addRow("睁眼静息（秒）", self.calib_open_spin)
         calibration_form.addRow("闭眼静息（秒）", self.calib_closed_spin)
         calibration_form.addRow("", self.eyes_closed_for_gate_check)
@@ -1476,7 +1487,7 @@ class MIDataCollectorWindow(QMainWindow):
         self._refresh_config_group_layout(force=True)
 
         tip = QLabel(
-            "提示可在右侧预览面板查看；若勾选“弹出受试者全屏提示窗”，开始采集后会自动全屏。"
+            "连接设备后先在右侧原始波形面板完成实验员测试；若勾选“弹出受试者全屏提示窗”，点击“开始采集”后会直接切到受试者全屏。"
             "运行中快捷键：空格 暂停/继续，B 标记坏试次（连续模式下标记命令失败），Esc 停止并保存。"
         )
         tip.setWordWrap(True)
@@ -1557,10 +1568,12 @@ class MIDataCollectorWindow(QMainWindow):
         protocol_group = QGroupBox("实验逻辑")
         protocol_layout = QVBoxLayout(protocol_group)
         protocol_text = QLabel(
-            "完整流程：质量检查 → 静息/伪迹校准 → 想象训练 → 多轮次主任务 → "
+            "操作员流程：连接设备后先在当前界面观察原始波形并调整参数，确认稳定后再开始正式采集。\n"
+            "正式流程：静息/伪迹校准 → 想象训练 → 多轮次主任务 → "
             "无控制 → 连续仿真。\n"
+            "连续仿真默认会按 MI run 边界拆开插入，不再全部堆到最后。\n"
             "主任务单试次固定顺序：注视(2秒) → 提示(1秒) → 想象(4秒) → 放松(2.5秒)。\n"
-            "点击开始后，当前窗口会按阶段更新提示与倒计时。"
+            "点击开始后，如勾选受试者全屏，当前屏幕会直接切到受试者提示界面。"
         )
         protocol_text.setWordWrap(True)
         protocol_text.setStyleSheet("font-size: 13px; color: #334155;")
@@ -1588,10 +1601,10 @@ class MIDataCollectorWindow(QMainWindow):
             status_layout.addWidget(label)
         layout.addWidget(status_group)
 
-        preview_group = QGroupBox("质量检查波形（原始）")
+        preview_group = QGroupBox("连接后质量检查波形（原始）")
         preview_layout = QVBoxLayout(preview_group)
         self.preview_status_label = QLabel(
-            "连接设备后开始刷新最近 5 秒原始 EEG；质量检查阶段请确认无掉线、坏道、饱和和异常漂移。"
+            "连接设备后开始刷新最近 5 秒原始 EEG；请先在实验员界面确认无掉线、坏道、饱和和异常漂移。"
         )
         self.preview_status_label.setWordWrap(True)
         self.preview_status_label.setStyleSheet(
@@ -1780,6 +1793,11 @@ class MIDataCollectorWindow(QMainWindow):
         continuous_gap_max_sec = float(self.cont_gap_max_spin.value())
         if continuous_gap_max_sec < continuous_gap_min_sec:
             raise ValueError("连续模式间隔最长时长不能小于最短时长。")
+        run_count = int(self.run_count_spin.value())
+        continuous_block_count = int(self.continuous_count_spin.value())
+        continuous_block_sec = float(self.continuous_sec_spin.value())
+        if continuous_block_count > 0 and continuous_block_sec > 0 and continuous_block_count > run_count:
+            raise ValueError("连续模式段数不能大于 MI run 数。当前流程每个 run 边界最多插入一段连续模式。")
 
         raw_artifact_types = self.artifact_types_edit.text().strip()
         artifact_types = normalize_artifact_types(raw_artifact_types)
@@ -1803,7 +1821,7 @@ class MIDataCollectorWindow(QMainWindow):
             cue_sec=float(self.cue_spin.value()),
             imagery_sec=float(self.imagery_spin.value()),
             iti_sec=float(self.iti_spin.value()),
-            run_count=int(self.run_count_spin.value()),
+            run_count=run_count,
             max_consecutive_same_class=int(self.max_consecutive_spin.value()),
             run_rest_sec=float(self.run_rest_spin.value()),
             long_run_rest_every=int(self.long_run_every_spin.value()),
@@ -1821,8 +1839,8 @@ class MIDataCollectorWindow(QMainWindow):
             idle_block_sec=float(self.idle_sec_spin.value()),
             idle_prepare_block_count=int(self.idle_prepare_count_spin.value()),
             idle_prepare_sec=float(self.idle_prepare_spin.value()),
-            continuous_block_count=int(self.continuous_count_spin.value()),
-            continuous_block_sec=float(self.continuous_sec_spin.value()),
+            continuous_block_count=continuous_block_count,
+            continuous_block_sec=continuous_block_sec,
             continuous_command_min_sec=continuous_command_min_sec,
             continuous_command_max_sec=continuous_command_max_sec,
             continuous_gap_min_sec=continuous_gap_min_sec,
@@ -1921,7 +1939,7 @@ class MIDataCollectorWindow(QMainWindow):
 
     def _phase_texts(self, phase: str, class_name: str | None) -> tuple[str, str]:
         if phase == "idle":
-            return "等待开始", "连接设备后点击“开始采集”。"
+            return "等待开始", "连接设备后先观察原始波形并确认稳定，再点击“开始采集”。"
         if phase == "quality_check":
             return "质量检查", "观察 30-60 秒原始波形，确认无掉线、坏道、饱和和异常漂移。"
         if phase == "calibration_open":
@@ -1970,6 +1988,8 @@ class MIDataCollectorWindow(QMainWindow):
         return PHASE_LABELS.get(phase, phase), ""
 
     def _participant_prompt(self) -> tuple[str, str, str, str | None]:
+        if self.session_paused:
+            return ("已暂停", "已暂停", "请保持稳定，等待继续。", None)
         if self.current_phase == "quality_check":
             return ("质量检查", "质量检查", "请保持静止，等待操作者确认信号质量。", None)
         if self.current_phase == "calibration_open":
@@ -2101,9 +2121,10 @@ class MIDataCollectorWindow(QMainWindow):
     def _update_preview_status(self) -> None:
         if self.preview_status_label is None:
             return
+        suggested_seconds = 0.0 if not hasattr(self, "quality_check_spin") else float(self.quality_check_spin.value())
         if self.device_info is None:
             self.preview_status_label.setText(
-                "连接设备后开始刷新最近 5 秒原始 EEG；质量检查阶段请确认无掉线、坏道、饱和和异常漂移。"
+                f"连接设备后开始刷新最近 5 秒原始 EEG；建议先观察约 {suggested_seconds:.0f} 秒，确认无掉线、坏道、饱和和异常漂移。"
             )
             return
         if self.current_phase == "quality_check":
@@ -2113,12 +2134,24 @@ class MIDataCollectorWindow(QMainWindow):
             return
         if self.session_running:
             self.preview_status_label.setText(
-                "实时面板持续显示原始 EEG（无滤波）；当前已离开质量检查阶段，可作为辅助监看。"
+                "实时面板持续显示原始 EEG（无滤波）；正式采集已经开始，该面板仅作为辅助监看。"
             )
             return
         self.preview_status_label.setText(
-            "设备已连接：实时原始波形正在刷新。开始采集后，质量检查阶段会优先用于实验员确认。"
+            f"设备已连接：请先在当前界面观察原始波形约 {suggested_seconds:.0f} 秒，确认稳定后再点击“开始采集”进入受试者全屏。"
         )
+
+    def _start_formal_protocol(self) -> None:
+        self.record_event("calibration_start")
+        if self.marker_failure_active:
+            return
+        self._start_next_calibration_step()
+        if self.marker_failure_active:
+            return
+        if self.use_separate_participant_screen:
+            self.show_participant_display()
+        else:
+            self.participant_window.hide()
 
     def _update_trial_meta_labels(self) -> None:
         total = len(self.sequence)
@@ -2213,8 +2246,8 @@ class MIDataCollectorWindow(QMainWindow):
         self.device_label.setText(
             f"设备：已连接 | 采样率 {sampling_rate:g} Hz | 通道 {', '.join(channel_names)}"
         )
-        self.summary_label.setText("状态：设备已准备好，可以开始采集")
-        self.current_label.setText("当前任务：等待开始")
+        self.summary_label.setText("状态：设备已准备好，请先检查原始波形稳定性")
+        self.current_label.setText("当前任务：实验员测试 / 等待开始")
         if self.preview_widget is not None:
             self.preview_widget.configure_stream(sampling_rate=sampling_rate, channel_names=channel_names)
         self._update_preview_status()
@@ -2287,6 +2320,56 @@ class MIDataCollectorWindow(QMainWindow):
         if "head_motion" in settings.artifact_types:
             add_step("calibration_head", "head_motion_block_start", "head_motion_block_end", settings.calibration_head_sec)
         return plan
+
+    def _build_continuous_schedule(self, settings: SessionSettings) -> list[int]:
+        block_count = max(0, int(settings.continuous_block_count))
+        run_count = max(0, int(settings.run_count))
+        if block_count <= 0 or run_count <= 0 or float(settings.continuous_block_sec) <= 0:
+            return []
+        if block_count == 1:
+            return [run_count]
+
+        schedule: list[int] = []
+        for block_index in range(block_count):
+            boundary = int(np.ceil(float((block_index + 1) * run_count) / float(block_count)))
+            boundary = min(max(1, boundary), run_count)
+            if not schedule or schedule[-1] != boundary:
+                schedule.append(boundary)
+        schedule.sort()
+        return schedule
+
+    def _play_imagery_tone(self, kind: str) -> None:
+        if kind == "start":
+            frequency = IMAGERY_START_TONE_HZ
+            duration_ms = IMAGERY_START_TONE_MS
+        else:
+            frequency = IMAGERY_END_TONE_HZ
+            duration_ms = IMAGERY_END_TONE_MS
+
+        def _play() -> None:
+            if winsound is not None:
+                try:
+                    winsound.Beep(frequency, duration_ms)
+                    return
+                except Exception:
+                    pass
+            app = QApplication.instance()
+            if app is not None:
+                QTimer.singleShot(0, app.beep)
+
+        threading.Thread(target=_play, daemon=True).start()
+
+    def _maybe_start_scheduled_continuous(self) -> bool:
+        if self.current_settings is None:
+            return False
+        if self.next_continuous_schedule_index >= len(self.continuous_schedule_after_runs):
+            return False
+        target_run = int(self.continuous_schedule_after_runs[self.next_continuous_schedule_index])
+        if int(self.current_run_index) != target_run:
+            return False
+        self.next_continuous_schedule_index += 1
+        self.start_continuous_block()
+        return True
 
     def _start_next_calibration_step(self) -> None:
         if self.current_settings is None:
@@ -2362,10 +2445,6 @@ class MIDataCollectorWindow(QMainWindow):
         if int(self.current_settings.idle_prepare_block_count) > 0 and float(self.current_settings.idle_prepare_sec) > 0:
             self.start_idle_prepare_block()
             return
-        if int(self.current_settings.continuous_block_count) > 0 and float(self.current_settings.continuous_block_sec) > 0:
-            self.continuous_block_index = 0
-            self.start_continuous_block()
-            return
         self.finish_session_and_request_save(manual_stop=False)
 
     def start_idle_block(self) -> None:
@@ -2396,10 +2475,6 @@ class MIDataCollectorWindow(QMainWindow):
         if int(self.current_settings.idle_prepare_block_count) > 0 and float(self.current_settings.idle_prepare_sec) > 0:
             self.start_idle_prepare_block()
             return
-        if int(self.current_settings.continuous_block_count) > 0 and float(self.current_settings.continuous_block_sec) > 0:
-            self.continuous_block_index = 0
-            self.start_continuous_block()
-            return
         self.finish_session_and_request_save(manual_stop=False)
 
     def start_idle_prepare_block(self) -> None:
@@ -2428,10 +2503,6 @@ class MIDataCollectorWindow(QMainWindow):
             and float(self.current_settings.idle_prepare_sec) > 0
         ):
             self.start_idle_prepare_block()
-            return
-        if self.current_settings is not None and int(self.current_settings.continuous_block_count) > 0 and float(self.current_settings.continuous_block_sec) > 0:
-            self.continuous_block_index = 0
-            self.start_continuous_block()
             return
         self.finish_session_and_request_save(manual_stop=False)
 
@@ -2544,8 +2615,13 @@ class MIDataCollectorWindow(QMainWindow):
         self.record_event("continuous_block_end", block_index=self.continuous_block_index)
         if self.marker_failure_active:
             return
-        if self.current_settings is not None and self.continuous_block_index < int(self.current_settings.continuous_block_count):
-            self.start_continuous_block()
+        if self._maybe_start_scheduled_continuous():
+            return
+        if self.current_settings is not None:
+            if self.current_run_index < int(self.current_settings.run_count):
+                self._start_next_mi_run()
+                return
+            self.start_post_collection_blocks_or_finish()
             return
         self.finish_session_and_request_save(manual_stop=False)
 
@@ -2595,6 +2671,8 @@ class MIDataCollectorWindow(QMainWindow):
         self.idle_block_index = 0
         self.idle_prepare_block_index = 0
         self.continuous_block_index = 0
+        self.continuous_schedule_after_runs = self._build_continuous_schedule(settings)
+        self.next_continuous_schedule_index = 0
         self.continuous_prompt_plan = []
         self.continuous_prompt_index = -1
         self.current_continuous_prompt = None
@@ -2614,25 +2692,20 @@ class MIDataCollectorWindow(QMainWindow):
         self._update_trial_meta_labels()
 
         self.summary_label.setText(f"状态：采集中，共 {len(self.sequence)} 个主任务试次")
-        self.current_label.setText("当前任务：质量检查")
+        self.current_label.setText("当前任务：正在进入正式流程")
         self.log(
             f"开始采集：被试 {settings.subject_id} | 会话 {settings.session_id} | "
             f"轮次 {settings.run_count} | 每类 {settings.trials_per_class} 试次"
         )
         self.log(f"本次会话随机种子（自动生成）：{settings.random_seed}")
+        if self.continuous_schedule_after_runs:
+            schedule_text = "、".join(str(item) for item in self.continuous_schedule_after_runs)
+            self.log(f"连续模式插入点：在完成 MI run {schedule_text} 后插入。")
 
         self.record_event("session_start")
-        self.record_event("quality_check_start")
         if self.marker_failure_active:
             return
-        self.enter_phase(
-            phase="quality_check",
-            duration_sec=float(settings.quality_check_sec),
-            class_name=None,
-            title="",
-            subtitle="",
-        )
-        self.participant_window.hide()
+        self._start_formal_protocol()
         self.update_button_states()
 
     def enter_phase(self, *, phase: str, duration_sec: float, class_name: str | None, title: str, subtitle: str) -> None:
@@ -2686,12 +2759,9 @@ class MIDataCollectorWindow(QMainWindow):
 
         if self.current_phase == "quality_check":
             self.record_event("quality_check_end")
-            self.record_event("calibration_start")
             if self.marker_failure_active:
                 return
-            if self.use_separate_participant_screen:
-                self.show_participant_display()
-            self._start_next_calibration_step()
+            self._start_formal_protocol()
             return
 
         if self.current_phase.startswith("calibration_"):
@@ -2796,6 +2866,7 @@ class MIDataCollectorWindow(QMainWindow):
                 subtitle="",
             )
             self.current_label.setText("当前任务：休息恢复")
+            self._play_imagery_tone("end")
             return
 
         if self.current_phase == "iti":
@@ -2819,6 +2890,8 @@ class MIDataCollectorWindow(QMainWindow):
                 if self.current_settings is not None:
                     self.record_event("mi_run_end", run_index=self.current_run_index)
                     if self.marker_failure_active:
+                        return
+                    if self._maybe_start_scheduled_continuous():
                         return
                     if self.current_run_index < int(self.current_settings.run_count):
                         rest_duration = self._run_rest_duration_for_completed_run(self.current_run_index)
@@ -2928,6 +3001,7 @@ class MIDataCollectorWindow(QMainWindow):
             title="",
             subtitle="",
         )
+        self._play_imagery_tone("start")
 
     def toggle_pause(self) -> None:
         if not self.session_running or self.waiting_for_save:
@@ -2959,6 +3033,7 @@ class MIDataCollectorWindow(QMainWindow):
             self.countdown_label.setText(f"已暂停，当前阶段剩余 {self.remaining_phase_sec:.1f} 秒")
             self.summary_label.setText("状态：采集已暂停")
             self._apply_phase_theme("paused", None)
+            self._sync_participant_display()
             self.log("采集已暂停。")
         else:
             self.session_paused = False
@@ -3339,6 +3414,34 @@ class MIDataCollectorWindow(QMainWindow):
             self.worker_stop_requested.emit()
         self.show_error(f"{message}\n\n本次会话不会保存，请检查设备连接后重新采集。")
 
+    def _set_save_failed_state(self, message: str) -> None:
+        self.waiting_for_save = False
+        self.capture_on_stop = False
+        self.phase_label.setText("保存失败")
+        self.countdown_label.setText("本次会话未保存，请检查原因后重新采集。")
+        self.summary_label.setText("状态：保存失败，本次会话未保存")
+        self.current_label.setText("当前任务：保存失败，请重新采集")
+        self._apply_phase_theme("idle", None)
+        self.cue_widget.set_state(
+            phase="idle",
+            class_name=None,
+            title="保存失败",
+            subtitle="当前会话未成功写入磁盘，请排查后重新开始。",
+        )
+        self.trial_banner_label.setText("当前试次：本次会话未保存")
+        self.next_task_label.setText("下一任务：检查原因后重新开始")
+        if self.use_separate_participant_screen:
+            self.restore_operator_window()
+        else:
+            self.participant_window.hide()
+        self.show_error(message)
+        self.update_button_states()
+
+    def _handle_missing_save_result(self) -> None:
+        if not self.waiting_for_save:
+            return
+        self._set_save_failed_state("保存失败：设备线程已结束，但没有返回完整会话数据。本次会话未保存，请重新采集。")
+
     def on_session_data_ready(self, payload: dict) -> None:
         if not self.capture_on_stop or self.current_settings is None or not self.event_log:
             self.log("设备停止，但没有需要保存的有效会话。")
@@ -3356,10 +3459,7 @@ class MIDataCollectorWindow(QMainWindow):
                 trial_records=list(self.trial_records),
             )
         except Exception as error:
-            self.waiting_for_save = False
-            self.capture_on_stop = False
-            self.show_error(f"保存会话失败：{error}")
-            self.update_button_states()
+            self._set_save_failed_state(f"保存会话失败：{error}")
             return
 
         self.waiting_for_save = False
@@ -3404,6 +3504,8 @@ class MIDataCollectorWindow(QMainWindow):
     def on_worker_thread_finished(self) -> None:
         marker_failure_active = self.marker_failure_active
         saved_completed = self.current_label.text().startswith("当前任务：数据已保存到")
+        save_failed = self.current_label.text().startswith("当前任务：保存失败")
+        pending_save_result = self.waiting_for_save
         self.worker = None
         self.worker_thread = None
         self.device_info = None
@@ -3422,6 +3524,8 @@ class MIDataCollectorWindow(QMainWindow):
         self.idle_block_index = 0
         self.idle_prepare_block_index = 0
         self.continuous_block_index = 0
+        self.continuous_schedule_after_runs = []
+        self.next_continuous_schedule_index = 0
         self.continuous_prompt_plan = []
         self.continuous_prompt_index = -1
         self.current_continuous_prompt = None
@@ -3434,16 +3538,18 @@ class MIDataCollectorWindow(QMainWindow):
             self.current_label.setText("当前任务：检查设备后重新开始")
             self.trial_banner_label.setText("当前试次：本次会话因标记写入失败未保存")
             self.next_task_label.setText("下一任务：排查设备连接或 marker 写入")
-        elif not saved_completed:
+        elif not saved_completed and not save_failed:
             self.current_label.setText("当前任务：无")
             self.trial_banner_label.setText("当前试次：未开始")
             self.next_task_label.setText("下一任务：--")
-        if not self.waiting_for_save and not saved_completed and not marker_failure_active:
+        if not self.waiting_for_save and not saved_completed and not save_failed and not marker_failure_active:
             self.summary_label.setText("状态：设备已断开")
         self.marker_failure_active = False
         self.marker_failure_message = ""
         self._update_preview_status()
         self.update_button_states()
+        if pending_save_result:
+            QTimer.singleShot(0, self._handle_missing_save_result)
 
     def closeEvent(self, event) -> None:  # noqa: N802
         if self.waiting_for_save:
