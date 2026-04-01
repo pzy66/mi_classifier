@@ -183,29 +183,29 @@ class SessionSettings:
     imagery_sec: float
     iti_sec: float
     random_seed: int
-    run_count: int = 4
+    run_count: int = 3
     max_consecutive_same_class: int = 2
-    run_rest_sec: float = 90.0
+    run_rest_sec: float = 60.0
     long_run_rest_every: int = 2
-    long_run_rest_sec: float = 180.0
+    long_run_rest_sec: float = 120.0
     quality_check_sec: float = 45.0
     practice_sec: float = 180.0
-    calibration_open_sec: float = 120.0
+    calibration_open_sec: float = 60.0
     calibration_closed_sec: float = 60.0
-    calibration_eye_sec: float = 60.0
-    calibration_blink_sec: float = 30.0
-    calibration_swallow_sec: float = 30.0
-    calibration_jaw_sec: float = 30.0
-    calibration_head_sec: float = 30.0
+    calibration_eye_sec: float = 30.0
+    calibration_blink_sec: float = 20.0
+    calibration_swallow_sec: float = 20.0
+    calibration_jaw_sec: float = 20.0
+    calibration_head_sec: float = 20.0
     idle_block_count: int = 2
-    idle_block_sec: float = 90.0
-    idle_prepare_block_count: int = 1
-    idle_prepare_sec: float = 90.0
+    idle_block_sec: float = 60.0
+    idle_prepare_block_count: int = 2
+    idle_prepare_sec: float = 60.0
     continuous_block_count: int = 2
-    continuous_block_sec: float = 150.0
-    continuous_command_min_sec: float = 3.0
-    continuous_command_max_sec: float = 6.0
-    continuous_gap_min_sec: float = 1.0
+    continuous_block_sec: float = 240.0
+    continuous_command_min_sec: float = 4.0
+    continuous_command_max_sec: float = 5.0
+    continuous_gap_min_sec: float = 2.0
     continuous_gap_max_sec: float = 3.0
     include_eyes_closed_rest_in_gate_neg: bool = False
     artifact_types: list[str] = field(default_factory=lambda: list(DEFAULT_ARTIFACT_TYPES))

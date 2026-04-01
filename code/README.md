@@ -29,6 +29,8 @@
 & 'C:\Users\P1233\miniconda3\envs\MI\python.exe' <script.py>
 ```
 
+说明：`run_*_pycharm.py` 启动器偏 GUI 友好，异常时可能弹窗；在终端排障时优先直接运行对应主脚本（如 `train_custom_dataset.py`）。
+
 ## 开发约束
 
 - 新增采集相关逻辑：放在 `collection/` + `shared/`

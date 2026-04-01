@@ -166,30 +166,30 @@ DEFAULT_CONFIG = {
     "baseline_sec": 2.0,
     "cue_sec": 1.0,
     "imagery_sec": 4.0,
-    "iti_sec": 2.5,
-    "run_count": 4,
+    "iti_sec": 2.0,
+    "run_count": 3,
     "max_consecutive_same_class": 2,
-    "run_rest_sec": 90.0,
+    "run_rest_sec": 60.0,
     "long_run_rest_every": 2,
-    "long_run_rest_sec": 180.0,
+    "long_run_rest_sec": 120.0,
     "quality_check_sec": 45.0,
     "practice_sec": 180.0,
-    "calibration_open_sec": 120.0,
+    "calibration_open_sec": 60.0,
     "calibration_closed_sec": 60.0,
-    "calibration_eye_sec": 60.0,
-    "calibration_blink_sec": 30.0,
-    "calibration_swallow_sec": 30.0,
-    "calibration_jaw_sec": 30.0,
-    "calibration_head_sec": 30.0,
+    "calibration_eye_sec": 30.0,
+    "calibration_blink_sec": 20.0,
+    "calibration_swallow_sec": 20.0,
+    "calibration_jaw_sec": 20.0,
+    "calibration_head_sec": 20.0,
     "idle_block_count": 2,
-    "idle_block_sec": 90.0,
-    "idle_prepare_block_count": 1,
-    "idle_prepare_sec": 90.0,
+    "idle_block_sec": 60.0,
+    "idle_prepare_block_count": 2,
+    "idle_prepare_sec": 60.0,
     "continuous_block_count": 2,
-    "continuous_block_sec": 150.0,
-    "continuous_command_min_sec": 3.0,
-    "continuous_command_max_sec": 6.0,
-    "continuous_gap_min_sec": 1.0,
+    "continuous_block_sec": 240.0,
+    "continuous_command_min_sec": 4.0,
+    "continuous_command_max_sec": 5.0,
+    "continuous_gap_min_sec": 2.0,
     "continuous_gap_max_sec": 3.0,
     "include_eyes_closed_rest_in_gate_neg": False,
     "artifact_types": ",".join(DEFAULT_ARTIFACT_TYPES),
@@ -478,6 +478,7 @@ class ParticipantDisplayWindow(QWidget):
 
     pause_requested = pyqtSignal()
     mark_bad_requested = pyqtSignal()
+    advance_requested = pyqtSignal()
     stop_requested = pyqtSignal()
 
     def __init__(self) -> None:
@@ -509,7 +510,7 @@ class ParticipantDisplayWindow(QWidget):
         )
         layout.addWidget(self.countdown_label)
 
-        self.hint_label = QLabel("空格 暂停/继续    B 标记坏试次/命令失败    Esc 停止并保存")
+        self.hint_label = QLabel("空格 暂停/继续    B 标记坏试次/命令失败    N 提前结束训练    Esc 停止并保存")
         self.hint_label.setAlignment(Qt.AlignCenter)
         self.hint_label.setStyleSheet("color: #94A3B8; font-size: 15px;")
         layout.addWidget(self.hint_label)
@@ -557,6 +558,10 @@ class ParticipantDisplayWindow(QWidget):
             self.mark_bad_requested.emit()
             event.accept()
             return
+        if event.key() == Qt.Key_N:
+            self.advance_requested.emit()
+            event.accept()
+            return
         if event.key() == Qt.Key_Escape:
             self.stop_requested.emit()
             event.accept()
@@ -575,6 +580,9 @@ class RealtimeEEGPreviewWidget(QWidget):
     MODE_IMPEDANCE = "IMP"
     LEAD_OFF_CURRENT_AMPS = 6e-9
     SERIES_RESISTOR_OHMS = 2200.0
+    DISPLAY_HIGHPASS_HZ = 1.0
+    DISPLAY_LOWPASS_HZ = 40.0
+    DISPLAY_FILTER_ORDER = 4
 
     CHANNEL_COLORS = [
         "#38BDF8",
@@ -718,16 +726,26 @@ class RealtimeEEGPreviewWidget(QWidget):
         except Exception:
             pass
         try:
+            DataFilter.perform_highpass(
+                y_plot,
+                self.sampling_rate,
+                float(self.DISPLAY_HIGHPASS_HZ),
+                int(self.DISPLAY_FILTER_ORDER),
+                FilterTypes.BUTTERWORTH_ZERO_PHASE.value,
+                0,
+            )
+        except Exception:
+            pass
+        try:
             DataFilter.remove_environmental_noise(y_plot, self.sampling_rate, NoiseTypes.FIFTY.value)
         except Exception:
             pass
         try:
-            DataFilter.perform_bandpass(
+            DataFilter.perform_lowpass(
                 y_plot,
                 self.sampling_rate,
-                1.0,
-                40.0,
-                4,
+                float(self.DISPLAY_LOWPASS_HZ),
+                int(self.DISPLAY_FILTER_ORDER),
                 FilterTypes.BUTTERWORTH_ZERO_PHASE.value,
                 0,
             )
@@ -763,7 +781,7 @@ class RealtimeEEGPreviewWidget(QWidget):
         if self.channel_names and self.sampling_rate > 0:
             freshness_sec = 0.0 if self.last_chunk_perf <= 0 else max(0.0, time.perf_counter() - self.last_chunk_perf)
             if self.mode == self.MODE_EEG:
-                mode_text = "EEG mode (display: detrend + 50Hz + 1-40Hz)"
+                mode_text = "EEG mode (display: detrend + 1Hz HP + 50Hz notch + 40Hz LP)"
             else:
                 mode_text = f"Impedance mode (CH{self.impedance_channel}, raw only)"
             header_text = (
@@ -1305,6 +1323,7 @@ class MIDataCollectorWindow(QMainWindow):
         self.participant_window = ParticipantDisplayWindow()
         self.participant_window.pause_requested.connect(self.toggle_pause)
         self.participant_window.mark_bad_requested.connect(self.mark_bad_trial)
+        self.participant_window.advance_requested.connect(self.request_phase_advance)
         self.participant_window.stop_requested.connect(self.stop_and_save)
         self.apply_default_values()
         self.refresh_board_input_state()
@@ -1780,7 +1799,8 @@ class MIDataCollectorWindow(QMainWindow):
 
         tip = QLabel(
             "连接设备后先在右侧原始波形面板完成实验员测试；若勾选“弹出受试者全屏提示窗”，点击“开始采集”后会直接切到受试者全屏。"
-            "运行中快捷键：空格 暂停/继续，B 标记坏试次（连续模式下标记命令失败），Esc 停止并保存。"
+            "运行中快捷键：空格 暂停/继续，B 标记坏试次（连续模式下标记命令失败），"
+            "N 提前结束训练/质检阶段，Esc 停止并保存。"
         )
         tip.setWordWrap(True)
         tip.setStyleSheet("color: #475569; font-size: 12px; padding: 4px;")
@@ -2272,7 +2292,7 @@ class MIDataCollectorWindow(QMainWindow):
         if phase == "idle":
             return "等待开始", "连接设备后先观察原始波形并确认稳定，再点击“开始采集”。"
         if phase == "quality_check":
-            return "质量检查", "观察 30-60 秒原始波形，确认无掉线、坏道、饱和和异常漂移。"
+            return "质量检查", "观察 30-45 秒原始波形，确认无掉线、坏道、饱和和异常漂移。"
         if phase == "calibration_open":
             return "睁眼静息", "注视中央十字，不做任何运动想象，保持自然眨眼。"
         if phase == "calibration_closed":
@@ -2296,7 +2316,7 @@ class MIDataCollectorWindow(QMainWindow):
         if phase == "iti":
             return "休息恢复", "放空当前想象内容，等待下一轮任务提示。"
         if phase == "run_rest":
-            return "轮次间休息", "请放松 1-3 分钟，可口头反馈哪个类别更难想象。"
+            return "轮次间休息", "请放松并准备下一轮，可口头反馈哪个类别更难想象。"
         if phase == "idle_block":
             return "无控制", "保持注意但不要做运动想象，自然眨眼即可。"
         if phase == "idle_prepare":
@@ -2306,7 +2326,17 @@ class MIDataCollectorWindow(QMainWindow):
                 label = str(self.current_continuous_prompt.get("class_label", ""))
                 if label == "no_control":
                     return "连续仿真", "当前命令：无控制（保持注意，不执行运动想象）。"
-                return "连续仿真", f"当前命令：{self._class_ui_name(label)}（持续 3-6 秒）。"
+                if self.current_settings is not None:
+                    cmd_min = float(self.current_settings.continuous_command_min_sec)
+                    cmd_max = float(self.current_settings.continuous_command_max_sec)
+                else:
+                    cmd_min = float(self.config.get("continuous_command_min_sec", DEFAULT_CONFIG["continuous_command_min_sec"]))
+                    cmd_max = float(self.config.get("continuous_command_max_sec", DEFAULT_CONFIG["continuous_command_max_sec"]))
+                if abs(cmd_max - cmd_min) < 1e-6:
+                    duration_text = f"{cmd_min:g} 秒"
+                else:
+                    duration_text = f"{cmd_min:g}-{cmd_max:g} 秒"
+                return "连续仿真", f"当前命令：{self._class_ui_name(label)}（持续 {duration_text}）。"
             return "连续仿真", "等待下一条随机命令。"
         if phase == "paused":
             return "已暂停", "恢复后将从当前阶段继续。"
@@ -3586,6 +3616,19 @@ class MIDataCollectorWindow(QMainWindow):
 
         self.update_button_states()
 
+    def request_phase_advance(self) -> None:
+        if not self.session_running or self.waiting_for_save or self.session_paused:
+            return
+        if self.current_phase not in {"practice", "quality_check"}:
+            return
+        phase_name = "想象训练" if self.current_phase == "practice" else "质量检查"
+        self.log(f"操作员确认，提前结束{phase_name}阶段。")
+        self.phase_deadline = time.perf_counter()
+        self.remaining_phase_sec = 0.0
+        self.phase_timer.stop()
+        self.update_countdown_text()
+        self.on_phase_tick()
+
     def mark_bad_trial(self) -> None:
         if self.current_phase == "continuous":
             self.mark_continuous_prompt_failed()
@@ -3842,6 +3885,10 @@ class MIDataCollectorWindow(QMainWindow):
             return
         if event.key() == Qt.Key_B:
             self.mark_bad_trial()
+            event.accept()
+            return
+        if event.key() == Qt.Key_N:
+            self.request_phase_advance()
             event.accept()
             return
         if event.key() == Qt.Key_Escape:

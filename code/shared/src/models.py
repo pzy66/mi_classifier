@@ -34,23 +34,27 @@ from src.custom_transformers import (
 
 
 DEFAULT_FBCSP_BANDS = [
+    (4.0, 8.0),
     (8.0, 12.0),
     (12.0, 16.0),
     (16.0, 20.0),
     (20.0, 24.0),
     (24.0, 28.0),
     (28.0, 32.0),
+    (32.0, 36.0),
+    (36.0, 40.0),
 ]
 
 DEFAULT_CENTRAL_CHANNEL_NAMES = ["C3", "Cz", "C4"]
 DEFAULT_CENTRAL_BRANCH_WEIGHT = 0.65
 CENTRAL_FBCSP_LDA_ALIASES = {"central_fbcsp_lda", "central-fbcsp-lda"}
 CENTRAL_FBCSP_LDA_BANDS = [
-    (6.0, 10.0),
-    (10.0, 14.0),
-    (14.0, 18.0),
-    (18.0, 24.0),
-    (24.0, 30.0),
+    (8.0, 12.0),
+    (12.0, 16.0),
+    (16.0, 20.0),
+    (20.0, 24.0),
+    (24.0, 28.0),
+    (28.0, 32.0),
 ]
 CENTRAL_FBCSP_LDA_COMPONENTS = 2
 DEFAULT_DEEP_STAGE_PRETRAIN_WINDOW_SECS = [2.5, 2.0]
@@ -375,7 +379,7 @@ def build_feature_extractor(
     fs: float = 250.0,
     bands: list[list[float]] | list[tuple[float, float]] | None = None,
     n_components: int = 4,
-    riemann_band: tuple[float, float] | list[float] = (8.0, 30.0),
+    riemann_band: tuple[float, float] | list[float] = (4.0, 40.0),
     estimator: str = "lwf",
     metric: str = "riemann",
 ):
@@ -492,7 +496,7 @@ def build_optimized_candidates(
     fs: float = 250.0,
     bands: list[list[float]] | list[tuple[float, float]] | None = None,
     n_components: int = 4,
-    riemann_band: tuple[float, float] | list[float] = (8.0, 30.0),
+    riemann_band: tuple[float, float] | list[float] = (4.0, 40.0),
     estimator: str = "lwf",
     metric: str = "riemann",
     kernel: str = "rbf",

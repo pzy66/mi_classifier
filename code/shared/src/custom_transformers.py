@@ -72,12 +72,15 @@ class OneVsRestFBCSP(BaseEstimator, TransformerMixin):
         fs: float = 250.0,
     ) -> None:
         self.bands = bands or [
+            (4.0, 8.0),
             (8.0, 12.0),
             (12.0, 16.0),
             (16.0, 20.0),
             (20.0, 24.0),
             (24.0, 28.0),
             (28.0, 32.0),
+            (32.0, 36.0),
+            (36.0, 40.0),
         ]
         self.n_components = n_components
         self.fs = fs
@@ -136,12 +139,15 @@ class BinaryFBCSPFeatureExtractor(BaseEstimator, TransformerMixin):
         fs: float = 250.0,
     ) -> None:
         self.bands = bands or [
+            (4.0, 8.0),
             (8.0, 12.0),
             (12.0, 16.0),
             (16.0, 20.0),
             (20.0, 24.0),
             (24.0, 28.0),
             (28.0, 32.0),
+            (32.0, 36.0),
+            (36.0, 40.0),
         ]
         self.n_components = n_components
         self.fs = fs
@@ -175,7 +181,7 @@ class RiemannFeatureExtractor(BaseEstimator, TransformerMixin):
     def __init__(
         self,
         *,
-        band: tuple[float, float] = (8.0, 30.0),
+        band: tuple[float, float] = (4.0, 40.0),
         fs: float = 250.0,
         estimator: str = "lwf",
         metric: str = "riemann",
@@ -214,7 +220,7 @@ class HybridFeatureExtractor(BaseEstimator, TransformerMixin):
         *,
         n_components: int = 4,
         fs: float = 250.0,
-        riemann_band: tuple[float, float] = (8.0, 30.0),
+        riemann_band: tuple[float, float] = (4.0, 40.0),
         estimator: str = "lwf",
         metric: str = "riemann",
     ) -> None:
@@ -254,7 +260,7 @@ class BinaryHybridFeatureExtractor(BaseEstimator, TransformerMixin):
         *,
         n_components: int = 4,
         fs: float = 250.0,
-        riemann_band: tuple[float, float] = (8.0, 30.0),
+        riemann_band: tuple[float, float] = (4.0, 40.0),
         estimator: str = "lwf",
         metric: str = "riemann",
     ) -> None:
@@ -298,7 +304,7 @@ class HierarchicalMIClassifier(BaseEstimator, ClassifierMixin):
         bands: list[tuple[float, float]] | None = None,
         n_components: int = 4,
         fs: float = 250.0,
-        riemann_band: tuple[float, float] = (8.0, 30.0),
+        riemann_band: tuple[float, float] = (4.0, 40.0),
         estimator: str = "lwf",
         metric: str = "riemann",
         classifier_name: str = "lda",

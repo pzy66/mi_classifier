@@ -31,12 +31,17 @@ python code/training/train_custom_dataset.py
 ```
 
 说明：`run_02_training.py` / `run_training_pycharm.py` 默认会附带 `--enforce-readiness`。
+如果你在纯终端里排障，优先直接跑 `train_custom_dataset.py`，避免弹窗式错误提示阻塞脚本退出。
 
 ## 2. 默认输入与输出
 
 默认输入：
 
 - `datasets/custom_mi`
+
+重要：若该目录为空（只有 README，没有 `*_mi_epochs.npz` 等数据文件），训练会直接失败并提示：
+
+- `No trainable data files were found`
 
 默认输出：
 
@@ -73,9 +78,10 @@ python code/training/train_custom_dataset.py
 
 ## 5. 默认关键参数
 
-- 预处理：`4-40Hz` 带通 + `50Hz` 陷波 + `CAR`
+- 预处理：`4-40Hz` 带通 + `50Hz` 陷波 + `CAR` + `standardize=False`
 - `window_secs=2.0,2.5,3.0`
-- `window_offset_secs=0.25,0.5,0.75`
+- `window_offset_secs=0.5,0.75`
+- FBCSP 两层：默认 filter bank `4-8,8-12,...,36-40`；`central_fbcsp_lda` 保守锚点 `8-12,...,28-32`
 - `min_class_trials=5`
 
 重要约束：
@@ -128,7 +134,7 @@ python code/training/train_custom_dataset.py --subject 001
 指定窗口和 offset：
 
 ```powershell
-python code/training/train_custom_dataset.py --window-secs 2.0,2.5 --window-offset-secs 0.25,0.5
+python code/training/train_custom_dataset.py --window-secs 2.0,2.5 --window-offset-secs 0.5,0.75
 ```
 
 覆盖候选模型：
@@ -164,3 +170,20 @@ python code/training/train_custom_dataset.py `
 - `selection_objective`（offline+continuous 加权分数与 selected_variant）
 
 建议先确认 gate/rejector 是否可用，再做实时测试。
+
+## 9. 常见失败与处理
+
+### 9.1 `No trainable data files were found`
+
+原因：默认数据目录 `datasets/custom_mi` 没有可训练文件，或 `--dataset-root` 指向错误。
+
+处理：
+
+1. 先采集并确认落盘 `*_mi_epochs.npz`
+2. 如数据不在默认目录，显式传 `--dataset-root`
+
+可先用命令快速检查：
+
+```powershell
+Get-ChildItem -LiteralPath .\datasets\custom_mi -Recurse -Filter *_mi_epochs.npz
+```

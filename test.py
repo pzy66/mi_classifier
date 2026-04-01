@@ -24,6 +24,9 @@ matplotlib.rcParams['axes.unicode_minus'] = False
 class CytonRealtimeDualMode:
     MODE_EEG = "EEG"
     MODE_IMP = "IMP"
+    DISPLAY_HIGHPASS_HZ = 1.0
+    DISPLAY_LOWPASS_HZ = 40.0
+    DISPLAY_FILTER_ORDER = 4
 
     def __init__(
         self,
@@ -390,18 +393,26 @@ class CytonRealtimeDualMode:
 
                 DataFilter.detrend(y_plot, DetrendOperations.CONSTANT.value)
 
+                DataFilter.perform_highpass(
+                    y_plot,
+                    self.sampling_rate,
+                    self.DISPLAY_HIGHPASS_HZ,
+                    self.DISPLAY_FILTER_ORDER,
+                    FilterTypes.BUTTERWORTH_ZERO_PHASE.value,
+                    0
+                )
+
                 DataFilter.remove_environmental_noise(
                     y_plot,
                     self.sampling_rate,
                     NoiseTypes.FIFTY.value
                 )
 
-                DataFilter.perform_bandpass(
+                DataFilter.perform_lowpass(
                     y_plot,
                     self.sampling_rate,
-                    1.0,
-                    40.0,
-                    4,
+                    self.DISPLAY_LOWPASS_HZ,
+                    self.DISPLAY_FILTER_ORDER,
                     FilterTypes.BUTTERWORTH_ZERO_PHASE.value,
                     0
                 )

@@ -81,6 +81,8 @@ class FBCSP:
             (20, 24),
             (24, 28),
             (28, 32),
+            (32, 36),
+            (36, 40),
         ]
         self.band_models_: list[tuple[tuple[float, float], CSP]] = []
 

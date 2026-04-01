@@ -48,7 +48,7 @@ DEFAULT_MODEL_PATH = PROJECT_ROOT / "code" / "realtime" / "models" / "custom_mi_
 DEFAULT_REPORT_PATH = PROJECT_ROOT / "code" / "training" / "reports" / "custom_mi_training_summary.json"
 DEFAULT_WINDOW_SECS = [2.0, 2.5, 3.0]
 DEFAULT_WINDOW_OFFSET_SEC = 0.5
-DEFAULT_WINDOW_OFFSET_SECS = [0.25, 0.5, 0.75]
+DEFAULT_WINDOW_OFFSET_SECS = [0.5, 0.75]
 DEFAULT_FUSION_METHOD = "log_weighted_mean"
 DEFAULT_FUSION_WEIGHT_GRID_STEP = 0.05
 DEFAULT_EPOCH_LENGTH_TOLERANCE_SAMPLES = 8
@@ -73,12 +73,15 @@ DEFAULT_TORCH_WEIGHT_DECAY = 1e-4
 DEFAULT_TORCH_PATIENCE = 12
 DEFAULT_TORCH_VALIDATION_SPLIT = 0.15
 DEFAULT_FBCSP_BANDS = [
+    (4.0, 8.0),
     (8.0, 12.0),
     (12.0, 16.0),
     (16.0, 20.0),
     (20.0, 24.0),
     (24.0, 28.0),
     (28.0, 32.0),
+    (32.0, 36.0),
+    (36.0, 40.0),
 ]
 DEFAULT_DEEP_STAGE_PRETRAIN_WINDOW_SECS = [2.5, 2.0]
 DEFAULT_DEEP_STAGE_FINETUNE_WINDOW_SECS = [2.0, 1.5]
@@ -2730,7 +2733,7 @@ def build_candidates(
         fs=float(sampling_rate),
         bands=DEFAULT_FBCSP_BANDS,
         n_components=4,
-        riemann_band=(8.0, 30.0),
+        riemann_band=DEFAULT_PREPROCESS_BANDPASS,
         estimator="lwf",
         metric="riemann",
         kernel="rbf",
@@ -4913,7 +4916,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--window-offset-secs",
         type=str,
         default="",
-        help="Candidate window offsets in seconds, e.g. 0.25,0.5,0.75.",
+        help="Candidate window offsets in seconds, e.g. 0.5,0.75.",
     )
     parser.add_argument(
         "--fusion-method",

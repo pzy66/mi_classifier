@@ -16,4 +16,6 @@
 3. 不建议手工改写 `custom_mi` 内文件名，避免破坏 run-stem 解析
 4. 需要归档时，优先整体复制 `sub-xxx` 目录，而不是拆文件
 
+补充：仓库通常不包含你的自采数据；`custom_mi` 可能初始只有 README。训练前请先完成采集。
+
 更多结构细节见：`datasets/custom_mi/README.md`

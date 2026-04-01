@@ -162,7 +162,7 @@ def build_optimized_model_candidates(config: dict) -> dict[str, object]:
         fs=float(config["dataset"]["sampling_rate"]),
         bands=config["model"].get("fbcsp_bands"),
         n_components=int(config["model"].get("fbcsp_components", 4)),
-        riemann_band=config["model"].get("riemann_band", [8.0, 30.0]),
+        riemann_band=config["model"].get("riemann_band", [4.0, 40.0]),
         estimator=config["model"].get("riemann_estimator", "lwf"),
         metric=config["model"].get("riemann_metric", "riemann"),
         kernel=config["model"].get("svm_kernel", "rbf"),
@@ -307,7 +307,7 @@ def preprocess_trials(X: np.ndarray, config: dict, *, model_type: str) -> np.nda
         bandpass=bandpass,
         notch=config["preprocessing"].get("notch"),
         apply_car=bool(config["preprocessing"].get("apply_car", True)),
-        standardize_data=bool(config["preprocessing"].get("standardize", True)),
+        standardize_data=bool(config["preprocessing"].get("standardize", False)),
     )
 
 

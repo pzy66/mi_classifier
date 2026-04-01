@@ -68,12 +68,16 @@ python code/collection/mi_data_collector.py --subject-id 001 --session-id 202603
 默认关键参数：
 
 - `trials_per_class=10`
-- `run_count=4`
-- `baseline/cue/imagery/iti = 2.0/1.0/4.0/2.5s`
+- `run_count=3`
+- `baseline/cue/imagery/iti = 2.0/1.0/4.0/2.0s`
 - `max_consecutive_same_class=2`
-- run 休息 `90s`，每 2 个 run 长休 `180s`
+- run 休息 `60s`，每 2 个 run 长休 `120s`
 - `quality_check_sec=45s` 仅作开始前人工观察参考，不写入正式事件流
-- `continuous = 2 x 150s`，默认插在完成 MI run 2 和 run 4 后
+- calibration 默认 `60/60/30/20/20/20/20s`（open/closed/eye/blink/swallow/jaw/head）
+- practice 默认 `180s`（可按 `N` 提前结束）
+- `idle_block = 2 x 60s`
+- `idle_prepare = 2 x 60s`
+- `continuous = 2 x 240s`，命令 `4-5s`、间隔 `2-3s`，默认插在完成 MI run 2 和 run 3 后
 - `include_eyes_closed_rest_in_gate_neg=False`（默认不把闭眼静息并入 gate 负类）
 
 continuous 参数约束：
@@ -113,6 +117,7 @@ continuous 参数约束：
 - `B`：
   - trial 阶段标记坏试次
   - continuous 阶段标记当前命令失败（`execution_success=0`）
+- `N`：提前结束当前 `practice`（或 `quality_check`）阶段
 - `Esc`：停止并保存
 
 提示音与暂停行为：

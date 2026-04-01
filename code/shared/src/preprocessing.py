@@ -75,10 +75,10 @@ def preprocess(
     X: np.ndarray,
     *,
     fs: float = 250.0,
-    bandpass: tuple[float, float] | list[float] | None = (8.0, 30.0),
+    bandpass: tuple[float, float] | list[float] | None = (4.0, 40.0),
     notch: float | None = 50.0,
     apply_car: bool = True,
-    standardize_data: bool = True,
+    standardize_data: bool = False,
 ) -> np.ndarray:
     """Run the baseline preprocessing pipeline."""
     X = np.asarray(X, dtype=np.float32)
