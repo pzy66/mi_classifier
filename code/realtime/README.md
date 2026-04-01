@@ -22,6 +22,14 @@ python code/realtime/run_realtime_pycharm.py
 python run_05_channel_monitor.py
 ```
 
+如果终端里没有 `python` 命令，请改用：
+
+```powershell
+& 'C:\Users\P1233\miniconda3\envs\MI\python.exe' run_03_realtime_infer.py
+```
+
+说明：实时脚本没有命令行参数入口，主要通过 `mi_realtime_infer_only.py` 里的 `USER_CONFIG` 配置运行。
+
 ## 2. 模型加载顺序
 
 默认优先加载：

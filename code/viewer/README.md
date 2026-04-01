@@ -22,6 +22,12 @@ python code/viewer/run_npz_viewer_pycharm.py
 python code/viewer/mi_npz_viewer.py --npz <path-to-npz>
 ```
 
+如果终端里没有 `python` 命令，请改用：
+
+```powershell
+& 'C:\Users\P1233\miniconda3\envs\MI\python.exe' code/viewer/mi_npz_viewer.py --help
+```
+
 ## 2. 支持读取的文件
 
 会扫描：

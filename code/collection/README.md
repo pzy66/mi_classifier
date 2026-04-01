@@ -22,6 +22,12 @@ python code/collection/run_collection_pycharm.py
 python code/collection/mi_data_collector.py --subject-id 001 --session-id 20260331_203000
 ```
 
+如果终端里没有 `python` 命令，请改用：
+
+```powershell
+& 'C:\Users\P1233\miniconda3\envs\MI\python.exe' code/collection/mi_data_collector.py --help
+```
+
 支持参数：
 
 - `--serial-port COM3`
@@ -123,6 +129,7 @@ continuous 参数约束：
 - `*_events.csv`
 - `*_trials.csv`
 - `*_session_meta.json`
+- `session_meta_latest.json`（同一 `ses-*` 目录下的最新会话指针）
 - `*_quality_report.json`
 - `*_mi_epochs.npz`
 - `*_gate_epochs.npz`

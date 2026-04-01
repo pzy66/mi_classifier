@@ -24,6 +24,14 @@ python code/training/run_training_pycharm.py
 python code/training/train_custom_dataset.py
 ```
 
+如果终端里没有 `python` 命令，请改用：
+
+```powershell
+& 'C:\Users\P1233\miniconda3\envs\MI\python.exe' code/training/train_custom_dataset.py --help
+```
+
+说明：`run_02_training.py` / `run_training_pycharm.py` 默认会附带 `--enforce-readiness`。
+
 ## 2. 默认输入与输出
 
 默认输入：
@@ -80,7 +88,7 @@ python code/training/train_custom_dataset.py
 - 每类累计 accepted trial 建议 `>=30`
 - 单个 run 内每类 accepted trial 建议 `>=8`
 - `run_02_training.py` / `run_training_pycharm.py` 默认会带 `--enforce-readiness`
-- 可通过 `--enforce-readiness` 手动启用不达标即报错
+- 直接手工跑 `train_custom_dataset.py` 时，可用 `--enforce-readiness` 启用不达标即报错
 - 可通过 `--recommended-total-class-trials` / `--recommended-run-class-trials` 调整阈值
 - 默认强制使用 `session_holdout/group_shuffle/aligned_to_main_split`；若确实需要旧的 trial 级回退，可显式加 `--allow-trial-level-fallback`
 

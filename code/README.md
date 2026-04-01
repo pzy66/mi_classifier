@@ -23,6 +23,12 @@
 
 这些脚本会自动处理路径，适合直接运行。
 
+如果终端没有 `python` 命令，统一改用：
+
+```powershell
+& 'C:\Users\P1233\miniconda3\envs\MI\python.exe' <script.py>
+```
+
 ## 开发约束
 
 - 新增采集相关逻辑：放在 `collection/` + `shared/`

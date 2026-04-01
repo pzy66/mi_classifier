@@ -34,6 +34,7 @@ from PyQt5.QtWidgets import (
     QPushButton,
     QSplitter,
     QSpinBox,
+    QSizePolicy,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -601,7 +602,8 @@ class RealtimeEEGPreviewWidget(QWidget):
         self.placeholder_text = f"连接设备后显示最近 {self.window_seconds:.1f} 秒波形。"
         self._dirty = False
 
-        self.setMinimumHeight(420)
+        self.setMinimumHeight(520)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.setStyleSheet("background: #08111F; border: 1px solid #1E293B; border-radius: 14px;")
 
         self.refresh_timer = QTimer(self)
@@ -735,7 +737,8 @@ class RealtimeEEGPreviewWidget(QWidget):
 
     def _draw_placeholder(self, painter: QPainter, rect: QRectF) -> None:
         painter.setPen(QColor("#CBD5E1"))
-        painter.setFont(QFont("Microsoft YaHei", 12))
+        placeholder_font = QFont("Microsoft YaHei", max(11, min(15, int(self.height() * 0.022))))
+        painter.setFont(placeholder_font)
         painter.drawText(rect, Qt.AlignCenter | Qt.TextWordWrap, self.placeholder_text)
 
     def paintEvent(self, event) -> None:  # noqa: N802
@@ -754,7 +757,8 @@ class RealtimeEEGPreviewWidget(QWidget):
 
         header_rect = QRectF(outer_rect.left() + 14, outer_rect.top() + 10, outer_rect.width() - 28, 28)
         painter.setPen(QColor("#E2E8F0"))
-        painter.setFont(QFont("Microsoft YaHei", 10, QFont.Bold))
+        header_font_size = max(10, min(14, int(self.height() * 0.02)))
+        painter.setFont(QFont("Microsoft YaHei", header_font_size, QFont.Bold))
 
         if self.channel_names and self.sampling_rate > 0:
             freshness_sec = 0.0 if self.last_chunk_perf <= 0 else max(0.0, time.perf_counter() - self.last_chunk_perf)
@@ -768,7 +772,7 @@ class RealtimeEEGPreviewWidget(QWidget):
             )
             painter.drawText(header_rect, Qt.AlignLeft | Qt.AlignVCenter, header_text)
             painter.setPen(QColor("#F59E0B" if freshness_sec > 1.0 else "#94A3B8"))
-            painter.setFont(QFont("Consolas", 10))
+            painter.setFont(QFont("Consolas", max(10, min(13, int(self.height() * 0.018)))))
             painter.drawText(
                 header_rect,
                 Qt.AlignRight | Qt.AlignVCenter,
@@ -784,9 +788,9 @@ class RealtimeEEGPreviewWidget(QWidget):
 
         channel_count = len(self.channel_names)
         row_gap = 8.0
-        row_height = max(28.0, (content_rect.height() - row_gap * (channel_count - 1)) / max(1, channel_count))
-        label_width = 58.0
-        right_info_width = 130.0
+        row_height = max(34.0, (content_rect.height() - row_gap * (channel_count - 1)) / max(1, channel_count))
+        label_width = 64.0
+        right_info_width = 140.0
 
         for channel_index, channel_name in enumerate(self.channel_names):
             row_top = content_rect.top() + channel_index * (row_height + row_gap)
@@ -805,7 +809,8 @@ class RealtimeEEGPreviewWidget(QWidget):
             painter.drawRoundedRect(row_rect, 10, 10)
 
             painter.setPen(QColor("#E2E8F0" if active_impedance_channel else "#94A3B8"))
-            painter.setFont(QFont("Consolas", 10, QFont.Bold))
+            channel_font_size = max(10, min(13, int(row_height * 0.36)))
+            painter.setFont(QFont("Consolas", channel_font_size, QFont.Bold))
             painter.drawText(
                 QRectF(row_rect.left() + 8, row_rect.top(), label_width - 10, row_rect.height()),
                 Qt.AlignLeft | Qt.AlignVCenter,
@@ -825,7 +830,7 @@ class RealtimeEEGPreviewWidget(QWidget):
             y_raw = np.asarray(self.buffers[channel_index], dtype=np.float64)
             if y_raw.size < 2:
                 painter.setPen(QColor("#64748B"))
-                painter.setFont(QFont("Microsoft YaHei", 9))
+                painter.setFont(QFont("Microsoft YaHei", max(9, min(11, int(row_height * 0.30)))))
                 painter.drawText(plot_rect, Qt.AlignCenter, "waiting...")
                 continue
 
@@ -895,7 +900,8 @@ class RealtimeEEGPreviewWidget(QWidget):
                 info_text = f"{np.ptp(y_raw):.0f} uV"
 
             painter.setPen(info_color)
-            painter.setFont(QFont("Consolas", 9))
+            info_font_size = max(9, min(12, int(row_height * 0.33)))
+            painter.setFont(QFont("Consolas", info_font_size))
             painter.drawText(
                 QRectF(plot_rect.right() + 6, row_rect.top(), right_info_width - 6, row_rect.height()),
                 Qt.AlignLeft | Qt.AlignVCenter,
@@ -963,6 +969,74 @@ class BoardCaptureWorker(QObject):
         except Exception:
             return 8
 
+    @staticmethod
+    def _is_transient_decode_error(error: Exception) -> bool:
+        """Detect transient serial decode noise (for example OpenBCI packet byte 0xA0)."""
+        text = str(error).strip().lower()
+        return (
+            ("utf-8" in text and "decode" in text and "invalid start byte" in text)
+            or ("byte 0xa0" in text)
+        )
+
+    @staticmethod
+    def _safe_stop_stream(board: BoardShim) -> None:
+        """Best-effort stop to avoid stream-state exceptions during mode switches."""
+        try:
+            board.stop_stream()
+        except Exception:
+            pass
+
+    def _start_stream_with_retry(
+        self,
+        board: BoardShim,
+        *,
+        buffer_size: int = 450000,
+        retries: int = 3,
+        retry_delay_sec: float = 0.08,
+    ) -> None:
+        """Start stream with short retries for transient state races."""
+        last_error: Exception | None = None
+        for attempt in range(max(1, int(retries))):
+            try:
+                board.start_stream(int(buffer_size))
+                return
+            except Exception as error:
+                last_error = error
+                self._safe_stop_stream(board)
+                time.sleep(float(retry_delay_sec) * float(attempt + 1))
+        if last_error is not None:
+            raise last_error
+
+    def _config_board_with_retry(
+        self,
+        board: BoardShim,
+        command: str,
+        *,
+        retries: int = 5,
+        retry_delay_sec: float = 0.08,
+    ) -> None:
+        """Send one board command with retries for transient UTF-8 decode noise."""
+        last_error: Exception | None = None
+        normalized_command = str(command)
+        for attempt in range(max(1, int(retries))):
+            try:
+                board.config_board(normalized_command)
+                return
+            except Exception as error:
+                last_error = error
+                if not self._is_transient_decode_error(error):
+                    raise
+                self._safe_stop_stream(board)
+                try:
+                    board.get_board_data()
+                except Exception:
+                    pass
+                time.sleep(float(retry_delay_sec) * float(attempt + 1))
+        if last_error is not None:
+            raise RuntimeError(
+                f"Failed command {normalized_command!r} after {int(retries)} retries: {last_error}"
+            ) from last_error
+
     def switch_quality_mode_sync(
         self,
         *,
@@ -984,24 +1058,28 @@ class BoardCaptureWorker(QObject):
             channel_count = self._selected_channel_count()
             channel = int(np.clip(int(target_channel), 1, channel_count))
 
-            try:
-                board.stop_stream()
-            except Exception:
-                pass
+            self._safe_stop_stream(board)
+            time.sleep(0.05)
 
             try:
                 if self.supports_impedance_mode():
                     for ch in range(1, channel_count + 1):
-                        board.config_board(self.build_impedance_command(ch, False, False))
+                        self._config_board_with_retry(
+                            board,
+                            self.build_impedance_command(ch, False, False),
+                        )
                     if bool(reset_default) or mode == self.MODE_EEG:
-                        board.config_board("d")
+                        self._config_board_with_retry(board, "d")
                     if mode == self.MODE_IMPEDANCE:
-                        board.config_board(self.build_impedance_command(channel, True, False))
+                        self._config_board_with_retry(
+                            board,
+                            self.build_impedance_command(channel, True, False),
+                        )
 
-                board.start_stream(450000)
+                self._start_stream_with_retry(board, buffer_size=450000)
             except Exception as error:
                 try:
-                    board.start_stream(450000)
+                    self._start_stream_with_retry(board, buffer_size=450000, retries=1)
                 except Exception:
                     pass
                 return False, f"Failed to switch quality-check mode: {error}"
@@ -1398,15 +1476,15 @@ class MIDataCollectorWindow(QMainWindow):
         session_panel = self._build_session_panel()
         self.main_splitter.addWidget(self.config_panel_widget)
         self.main_splitter.addWidget(session_panel)
-        self.main_splitter.setStretchFactor(0, 7)
-        self.main_splitter.setStretchFactor(1, 3)
-        self.main_splitter.setSizes([1200, 500])
+        self.main_splitter.setStretchFactor(0, 6)
+        self.main_splitter.setStretchFactor(1, 4)
+        self.main_splitter.setSizes([1080, 760])
         self.main_splitter.splitterMoved.connect(lambda _pos, _idx: self._refresh_config_group_layout())
         body.addWidget(self.main_splitter, stretch=1)
 
         self.operator_preview_panel = self._build_focus_panel()
-        self.operator_preview_panel.setMinimumWidth(460)
-        body.addWidget(self.operator_preview_panel, stretch=0)
+        self.operator_preview_panel.setParent(self)
+        self.operator_preview_panel.hide()
         self._refresh_config_group_layout(force=True)
 
         self.log_group = QGroupBox("运行日志")
@@ -1434,11 +1512,13 @@ class MIDataCollectorWindow(QMainWindow):
             self.log_text.setMinimumHeight(76 if compact else 92)
         if self.main_splitter is not None:
             if compact:
-                self.main_splitter.setStretchFactor(0, 8)
-                self.main_splitter.setStretchFactor(1, 2)
-            else:
                 self.main_splitter.setStretchFactor(0, 7)
                 self.main_splitter.setStretchFactor(1, 3)
+            else:
+                self.main_splitter.setStretchFactor(0, 6)
+                self.main_splitter.setStretchFactor(1, 4)
+        if self.preview_widget is not None:
+            self.preview_widget.setMinimumHeight(460 if compact else 560)
 
     def _build_config_panel(self) -> QWidget:
         panel = QWidget()
@@ -1790,6 +1870,7 @@ class MIDataCollectorWindow(QMainWindow):
         protocol_text.setWordWrap(True)
         protocol_text.setStyleSheet("font-size: 13px; color: #334155;")
         protocol_layout.addWidget(protocol_text)
+        protocol_group.setMaximumHeight(200)
         layout.addWidget(protocol_group)
 
         status_group = QGroupBox("当前状态")
@@ -1811,22 +1892,22 @@ class MIDataCollectorWindow(QMainWindow):
             label.setWordWrap(True)
             label.setStyleSheet("font-size: 13px; color: #1E293B;")
             status_layout.addWidget(label)
-        layout.addWidget(status_group)
+        status_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
 
-        preview_group = QGroupBox("连接后质量检查（EEG / 阻抗）")
+        preview_group = QGroupBox("连接后质量检查（EEG / 阻抗，5 秒窗）")
         preview_layout = QVBoxLayout(preview_group)
         self.preview_status_label = QLabel(
             "连接设备后先做质量检查：可在 EEG/阻抗模式切换，确认无掉线、坏道、饱和、异常漂移和接触不良。"
         )
         self.preview_status_label.setWordWrap(True)
         self.preview_status_label.setStyleSheet(
-            "font-size: 12px; color: #475569; background: #F8FAFC; border-radius: 8px; padding: 6px 8px;"
+            "font-size: 13px; color: #334155; background: #F8FAFC; border-radius: 8px; padding: 8px 10px;"
         )
         preview_layout.addWidget(self.preview_status_label)
 
         preview_control_layout = QHBoxLayout()
         self.preview_mode_label = QLabel("Quality mode: waiting for device")
-        self.preview_mode_label.setStyleSheet("font-size: 12px; color: #1E293B;")
+        self.preview_mode_label.setStyleSheet("font-size: 13px; color: #0F172A; font-weight: 600;")
         preview_control_layout.addWidget(self.preview_mode_label, 1)
 
         self.preview_to_eeg_button = QPushButton("EEG模式")
@@ -1841,7 +1922,7 @@ class MIDataCollectorWindow(QMainWindow):
             self.preview_next_ch_button,
             self.preview_reset_button,
         ):
-            button.setMinimumHeight(30)
+            button.setMinimumHeight(34)
             button.setEnabled(False)
 
         self.preview_to_eeg_button.clicked.connect(self.on_preview_to_eeg_clicked)
@@ -1858,8 +1939,10 @@ class MIDataCollectorWindow(QMainWindow):
         preview_layout.addLayout(preview_control_layout)
 
         self.preview_widget = RealtimeEEGPreviewWidget(window_seconds=5.0)
+        self.preview_widget.setMinimumHeight(560)
         preview_layout.addWidget(self.preview_widget, stretch=1)
-        layout.addWidget(preview_group, stretch=1)
+        layout.addWidget(preview_group, stretch=4)
+        layout.addWidget(status_group, stretch=0)
 
         order_group = QGroupBox("试次安排")
         order_layout = QVBoxLayout(order_group)
@@ -4065,6 +4148,12 @@ def main() -> int:
     parser.add_argument("--session-id", type=str, default="", help="预填会话编号")
     parser.add_argument("--synthetic", action="store_true", help="使用 BrainFlow 模拟板卡演示界面")
     args = parser.parse_args()
+
+    try:
+        QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+        QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
+    except Exception:
+        pass
 
     app = QApplication(sys.argv)
     app.setApplicationName("运动想象数据采集器")

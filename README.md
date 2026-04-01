@@ -19,6 +19,12 @@ pip install -r requirements.txt
 pip install -r requirements-realtime.txt
 ```
 
+如果终端里没有 `python` 命令，请改用解释器绝对路径：
+
+```powershell
+& 'C:\Users\P1233\miniconda3\envs\MI\python.exe' run_02_training.py
+```
+
 可选（训练深度候选）：
 
 ```powershell
@@ -156,6 +162,7 @@ sub-001_ses-20260331_203000_run-001_tpc-10_n-160_ok-154
 - `*_events.csv`
 - `*_trials.csv`
 - `*_session_meta.json`
+- `session_meta_latest.json`（会话目录内“最新一次保存”的快捷指针）
 - `*_quality_report.json`
 - `*_mi_epochs.npz`
 - `*_gate_epochs.npz`
@@ -174,6 +181,8 @@ sub-001_ses-20260331_203000_run-001_tpc-10_n-160_ok-154
 ## 4. 训练说明
 
 训练入口：`python run_02_training.py`（实际调用 `code/training/train_custom_dataset.py`）。
+
+补充：`run_02_training.py` 默认会带 `--enforce-readiness`，即数据未达到建议准入阈值时直接报错。
 
 ### 4.1 训练读取数据
 

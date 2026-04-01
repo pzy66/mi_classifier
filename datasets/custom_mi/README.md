@@ -13,6 +13,7 @@ datasets/custom_mi/
         |-- <run_stem>_events.csv
         |-- <run_stem>_trials.csv
         |-- <run_stem>_session_meta.json
+        |-- session_meta_latest.json
         |-- <run_stem>_quality_report.json
         |-- <run_stem>_mi_epochs.npz
         |-- <run_stem>_gate_epochs.npz
@@ -33,6 +34,7 @@ sub-001_ses-20260331_203000_run-001_tpc-10_n-160_ok-154
 - `*_events.csv`：事件日志（marker/sample/block/prompt 等）
 - `*_trials.csv`：trial 级记录（含 accepted/rejected）
 - `*_session_meta.json`：会话参数与统计汇总
+- `session_meta_latest.json`：当前 `ses-*` 目录最近一次保存的 meta 快捷指针
 - `*_quality_report.json`：按通道质量统计
 - `*_mi_epochs.npz`：主分类训练样本
 - `*_gate_epochs.npz`：gate 训练样本

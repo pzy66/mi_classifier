@@ -31,6 +31,7 @@ sub-001_ses-20260331_203000_run-002_tpc-10_n-160_ok-154
 - `*_events.csv`
 - `*_trials.csv`
 - `*_session_meta.json`
+- `session_meta_latest.json`（不带 run-stem，指向当前 `ses-*` 目录内最近一次保存）
 - `*_quality_report.json`
 - `*_mi_epochs.npz`
 - `*_gate_epochs.npz`
