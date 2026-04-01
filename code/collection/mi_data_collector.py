@@ -13,8 +13,8 @@ from pathlib import Path
 
 import numpy as np
 from brainflow.board_shim import BoardIds, BoardShim, BrainFlowInputParams
-from brainflow.data_filter import DataFilter, DetrendOperations, FilterTypes, NoiseTypes
-from PyQt5.QtCore import QObject, QPointF, QRectF, Qt, QThread, QTimer, pyqtSignal, pyqtSlot
+from brainflow.data_filter import DataFilter, FilterTypes, NoiseTypes
+from PyQt5.QtCore import QObject, QPointF, QRect, QRectF, Qt, QThread, QTimer, pyqtSignal, pyqtSlot
 from PyQt5.QtGui import QBrush, QColor, QFont, QImage, QLinearGradient, QPainter, QPainterPath, QPen
 from PyQt5.QtWidgets import (
     QApplication,
@@ -35,6 +35,8 @@ from PyQt5.QtWidgets import (
     QSplitter,
     QSpinBox,
     QSizePolicy,
+    QStackedWidget,
+    QTabWidget,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -573,6 +575,47 @@ class ParticipantDisplayWindow(QWidget):
         event.ignore()
 
 
+def build_fbcca_style_display_signal(
+    y_raw: np.ndarray,
+    sampling_rate: float,
+    *,
+    baseline_hz: float = 3.0,
+    baseline_order: int = 1,
+) -> np.ndarray:
+    """Display-only preprocessing used for operator preview.
+
+    This never mutates the source buffer and is not part of the saved-data path.
+    """
+
+    y = np.asarray(y_raw, dtype=np.float64)
+    if y.size <= 10 or float(sampling_rate) <= 1.0:
+        return y.copy()
+
+    y_plot = y.copy()
+    baseline = y_plot.copy()
+
+    try:
+        DataFilter.perform_lowpass(
+            baseline,
+            float(sampling_rate),
+            float(baseline_hz),
+            int(baseline_order),
+            FilterTypes.BUTTERWORTH_ZERO_PHASE.value,
+            0,
+        )
+        y_plot = y_plot - baseline
+    except Exception:
+        pass
+
+    try:
+        DataFilter.remove_environmental_noise(y_plot, float(sampling_rate), NoiseTypes.FIFTY.value)
+    except Exception:
+        pass
+
+    y_plot = y_plot - float(np.mean(y_plot))
+    return y_plot
+
+
 class RealtimeEEGPreviewWidget(QWidget):
     """Operator-facing EEG/impedance preview for connection quality checks."""
 
@@ -580,9 +623,8 @@ class RealtimeEEGPreviewWidget(QWidget):
     MODE_IMPEDANCE = "IMP"
     LEAD_OFF_CURRENT_AMPS = 6e-9
     SERIES_RESISTOR_OHMS = 2200.0
-    DISPLAY_HIGHPASS_HZ = 1.0
-    DISPLAY_LOWPASS_HZ = 40.0
-    DISPLAY_FILTER_ORDER = 4
+    DISPLAY_BASELINE_HZ = 3.0
+    DISPLAY_BASELINE_ORDER = 1
 
     CHANNEL_COLORS = [
         "#38BDF8",
@@ -718,40 +760,14 @@ class RealtimeEEGPreviewWidget(QWidget):
     def _build_plot_signal(self, y_raw: np.ndarray) -> np.ndarray:
         y = np.asarray(y_raw, dtype=np.float64)
         if y.size <= 10 or self.mode != self.MODE_EEG or self.sampling_rate <= 1.0:
-            return y
+            return y.copy()
 
-        y_plot = y.copy()
-        try:
-            DataFilter.detrend(y_plot, DetrendOperations.CONSTANT.value)
-        except Exception:
-            pass
-        try:
-            DataFilter.perform_highpass(
-                y_plot,
-                self.sampling_rate,
-                float(self.DISPLAY_HIGHPASS_HZ),
-                int(self.DISPLAY_FILTER_ORDER),
-                FilterTypes.BUTTERWORTH_ZERO_PHASE.value,
-                0,
-            )
-        except Exception:
-            pass
-        try:
-            DataFilter.remove_environmental_noise(y_plot, self.sampling_rate, NoiseTypes.FIFTY.value)
-        except Exception:
-            pass
-        try:
-            DataFilter.perform_lowpass(
-                y_plot,
-                self.sampling_rate,
-                float(self.DISPLAY_LOWPASS_HZ),
-                int(self.DISPLAY_FILTER_ORDER),
-                FilterTypes.BUTTERWORTH_ZERO_PHASE.value,
-                0,
-            )
-        except Exception:
-            pass
-        return y_plot
+        return build_fbcca_style_display_signal(
+            y,
+            self.sampling_rate,
+            baseline_hz=float(self.DISPLAY_BASELINE_HZ),
+            baseline_order=int(self.DISPLAY_BASELINE_ORDER),
+        )
 
     def _draw_placeholder(self, painter: QPainter, rect: QRectF) -> None:
         painter.setPen(QColor("#CBD5E1"))
@@ -773,33 +789,48 @@ class RealtimeEEGPreviewWidget(QWidget):
         painter.setBrush(QColor("#0B1727"))
         painter.drawRoundedRect(outer_rect, 14, 14)
 
-        header_rect = QRectF(outer_rect.left() + 14, outer_rect.top() + 10, outer_rect.width() - 28, 28)
-        painter.setPen(QColor("#E2E8F0"))
-        header_font_size = max(10, min(14, int(self.height() * 0.02)))
-        painter.setFont(QFont("Microsoft YaHei", header_font_size, QFont.Bold))
+        header_rect = QRectF(outer_rect.left() + 14, outer_rect.top() + 10, outer_rect.width() - 28, 44)
+        header_narrow = header_rect.width() < 640.0
+        title_rect = QRectF(header_rect.left(), header_rect.top(), header_rect.width(), 20)
+        meta_rect = QRectF(header_rect.left(), header_rect.top() + 22, header_rect.width(), 18 if not header_narrow else 34)
 
         if self.channel_names and self.sampling_rate > 0:
             freshness_sec = 0.0 if self.last_chunk_perf <= 0 else max(0.0, time.perf_counter() - self.last_chunk_perf)
             if self.mode == self.MODE_EEG:
-                mode_text = "EEG mode (display: detrend + 1Hz HP + 50Hz notch + 40Hz LP)"
+                title_text = "EEG 模式 | FBCCA 风格仅显示预处理"
+                meta_text = (
+                    f"保存保持原始 | {len(self.channel_names)} 通道 | "
+                    f"{self.sampling_rate:g} Hz | 窗口 {self.window_seconds:.1f}s"
+                )
             else:
-                mode_text = f"Impedance mode (CH{self.impedance_channel}, raw only)"
-            header_text = (
-                f"{mode_text} | {len(self.channel_names)} ch | {self.sampling_rate:g} Hz | "
-                f"window {self.window_seconds:.1f}s"
-            )
-            painter.drawText(header_rect, Qt.AlignLeft | Qt.AlignVCenter, header_text)
-            painter.setPen(QColor("#F59E0B" if freshness_sec > 1.0 else "#94A3B8"))
-            painter.setFont(QFont("Consolas", max(10, min(13, int(self.height() * 0.018)))))
-            painter.drawText(
-                header_rect,
-                Qt.AlignRight | Qt.AlignVCenter,
-                f"last update {freshness_sec:.2f}s",
-            )
-        else:
-            painter.drawText(header_rect, Qt.AlignLeft | Qt.AlignVCenter, "EEG / Impedance Preview")
+                title_text = f"阻抗模式 | CH{self.impedance_channel} | 原始显示"
+                meta_text = f"{len(self.channel_names)} 通道 | {self.sampling_rate:g} Hz | 窗口 {self.window_seconds:.1f}s"
 
-        content_rect = QRectF(outer_rect.left() + 14, outer_rect.top() + 48, outer_rect.width() - 28, outer_rect.height() - 62)
+            painter.setPen(QColor("#E2E8F0"))
+            painter.setFont(QFont("Microsoft YaHei", max(10, min(14, int(self.height() * 0.02))), QFont.Bold))
+            painter.drawText(title_rect, Qt.AlignLeft | Qt.AlignVCenter | Qt.TextWordWrap, title_text)
+
+            painter.setPen(QColor("#94A3B8"))
+            painter.setFont(QFont("Consolas", max(9, min(12, int(self.height() * 0.017)))))
+            if header_narrow:
+                painter.drawText(
+                    meta_rect,
+                    Qt.AlignLeft | Qt.AlignTop | Qt.TextWordWrap,
+                    f"{meta_text} | 最近更新 {freshness_sec:.2f}s",
+                )
+            else:
+                meta_left_rect = QRectF(meta_rect.left(), meta_rect.top(), max(120.0, meta_rect.width() - 132.0), meta_rect.height())
+                meta_right_rect = QRectF(meta_rect.right() - 128.0, meta_rect.top(), 128.0, meta_rect.height())
+                painter.drawText(meta_left_rect, Qt.AlignLeft | Qt.AlignVCenter | Qt.TextWordWrap, meta_text)
+                painter.setPen(QColor("#F59E0B" if freshness_sec > 1.0 else "#94A3B8"))
+                painter.drawText(meta_right_rect, Qt.AlignRight | Qt.AlignVCenter, f"最近更新 {freshness_sec:.2f}s")
+        else:
+            painter.setPen(QColor("#E2E8F0"))
+            painter.setFont(QFont("Microsoft YaHei", max(10, min(14, int(self.height() * 0.02))), QFont.Bold))
+            painter.drawText(header_rect, Qt.AlignLeft | Qt.AlignVCenter, "EEG / 阻抗预览")
+
+        content_top = outer_rect.top() + (80 if header_narrow else 66)
+        content_rect = QRectF(outer_rect.left() + 14, content_top, outer_rect.width() - 28, outer_rect.bottom() - content_top - 14)
         if not self.channel_names or not self.buffers:
             self._draw_placeholder(painter, content_rect)
             return
@@ -808,7 +839,7 @@ class RealtimeEEGPreviewWidget(QWidget):
         row_gap = 8.0
         row_height = max(34.0, (content_rect.height() - row_gap * (channel_count - 1)) / max(1, channel_count))
         label_width = 64.0
-        right_info_width = 140.0
+        right_info_width = min(140.0, max(96.0, content_rect.width() * 0.22))
 
         for channel_index, channel_name in enumerate(self.channel_names):
             row_top = content_rect.top() + channel_index * (row_height + row_gap)
@@ -849,7 +880,7 @@ class RealtimeEEGPreviewWidget(QWidget):
             if y_raw.size < 2:
                 painter.setPen(QColor("#64748B"))
                 painter.setFont(QFont("Microsoft YaHei", max(9, min(11, int(row_height * 0.30)))))
-                painter.drawText(plot_rect, Qt.AlignCenter, "waiting...")
+                painter.drawText(plot_rect, Qt.AlignCenter, "等待数据...")
                 continue
 
             y = self._build_plot_signal(y_raw)
@@ -962,6 +993,8 @@ class BoardCaptureWorker(QObject):
         self.marker_row: int | None = None
         self.timestamp_row: int | None = None
         self.sampling_rate: float | None = None
+        self.current_quality_mode = self.MODE_EEG
+        self._hw_impedance_channel: int | None = None
 
     @staticmethod
     def build_impedance_command(channel: int, test_p: bool = True, test_n: bool = False) -> str:
@@ -1055,6 +1088,30 @@ class BoardCaptureWorker(QObject):
                 f"Failed command {normalized_command!r} after {int(retries)} retries: {last_error}"
             ) from last_error
 
+    def _fast_switch_impedance_channel(self, board: BoardShim, target_channel: int) -> bool:
+        previous_channel = self._hw_impedance_channel
+        if previous_channel is None:
+            return False
+        if int(previous_channel) == int(target_channel):
+            return True
+
+        try:
+            self._config_board_with_retry(
+                board,
+                self.build_impedance_command(int(previous_channel), False, False),
+                retries=1,
+            )
+            self._config_board_with_retry(
+                board,
+                self.build_impedance_command(int(target_channel), True, False),
+                retries=1,
+            )
+        except Exception:
+            return False
+
+        self._hw_impedance_channel = int(target_channel)
+        return True
+
     def switch_quality_mode_sync(
         self,
         *,
@@ -1075,35 +1132,51 @@ class BoardCaptureWorker(QObject):
             board = self.board
             channel_count = self._selected_channel_count()
             channel = int(np.clip(int(target_channel), 1, channel_count))
-
-            self._safe_stop_stream(board)
-            time.sleep(0.05)
+            fast_switched = False
 
             try:
-                if self.supports_impedance_mode():
-                    for ch in range(1, channel_count + 1):
-                        self._config_board_with_retry(
-                            board,
-                            self.build_impedance_command(ch, False, False),
-                        )
-                    if bool(reset_default) or mode == self.MODE_EEG:
-                        self._config_board_with_retry(board, "d")
-                    if mode == self.MODE_IMPEDANCE:
-                        self._config_board_with_retry(
-                            board,
-                            self.build_impedance_command(channel, True, False),
-                        )
+                if (
+                    mode == self.MODE_IMPEDANCE
+                    and self.current_quality_mode == self.MODE_IMPEDANCE
+                    and self._fast_switch_impedance_channel(board, channel)
+                ):
+                    fast_switched = True
+                else:
+                    self._safe_stop_stream(board)
+                    time.sleep(0.05)
 
-                self._start_stream_with_retry(board, buffer_size=450000)
+                    if self.supports_impedance_mode():
+                        for ch in range(1, channel_count + 1):
+                            self._config_board_with_retry(
+                                board,
+                                self.build_impedance_command(ch, False, False),
+                            )
+                        if bool(reset_default) or mode == self.MODE_EEG:
+                            self._config_board_with_retry(board, "d")
+                        if mode == self.MODE_IMPEDANCE:
+                            self._config_board_with_retry(
+                                board,
+                                self.build_impedance_command(channel, True, False),
+                            )
+                            self._hw_impedance_channel = int(channel)
+                        else:
+                            self._hw_impedance_channel = None
+
+                    self._start_stream_with_retry(board, buffer_size=450000)
             except Exception as error:
-                try:
-                    self._start_stream_with_retry(board, buffer_size=450000, retries=1)
-                except Exception:
-                    pass
+                if not fast_switched:
+                    try:
+                        self._start_stream_with_retry(board, buffer_size=450000, retries=1)
+                    except Exception:
+                        pass
                 return False, f"Failed to switch quality-check mode: {error}"
 
+            self.current_quality_mode = mode
+
         if mode == self.MODE_IMPEDANCE:
-            self.status_changed.emit(f"Quality-check mode -> IMPEDANCE (CH{channel})")
+            self.status_changed.emit(
+                f"Quality-check mode -> IMPEDANCE (CH{channel}{', fast' if fast_switched else ''})"
+            )
         elif bool(reset_default):
             self.status_changed.emit("Quality-check mode -> EEG (reset defaults)")
         else:
@@ -1129,6 +1202,8 @@ class BoardCaptureWorker(QObject):
                 self.board = BoardShim(self.board_id, params)
                 self.board.prepare_session()
                 self.board.start_stream(450000)
+                self.current_quality_mode = self.MODE_EEG
+                self._hw_impedance_channel = None
 
             eeg_rows = BoardShim.get_eeg_channels(self.board_id)
             if len(self.channel_positions) > len(eeg_rows):
@@ -1295,13 +1370,17 @@ class MIDataCollectorWindow(QMainWindow):
         self.marker_failure_active = False
         self.marker_failure_message = ""
         self.config_panel_widget: QWidget | None = None
-        self.config_groups_grid: QGridLayout | None = None
+        self.config_section_combo: QComboBox | None = None
+        self.config_stack: QStackedWidget | None = None
         self.config_groups: list[QWidget] = []
         self.config_grid_columns = 0
         self.main_splitter: QSplitter | None = None
+        self.session_tabs: QTabWidget | None = None
         self.operator_preview_panel: QWidget | None = None
         self.hero_title_label: QLabel | None = None
         self.hero_subtitle_label: QLabel | None = None
+        self.root_layout: QVBoxLayout | None = None
+        self.body_layout: QHBoxLayout | None = None
         self.preview_widget: RealtimeEEGPreviewWidget | None = None
         self.preview_status_label: QLabel | None = None
         self.preview_mode_label: QLabel | None = None
@@ -1314,6 +1393,10 @@ class MIDataCollectorWindow(QMainWindow):
         self.preview_impedance_channel = 1
         self.log_group: QGroupBox | None = None
         self.log_text: QTextEdit | None = None
+        self.protocol_text_label: QLabel | None = None
+        self.config_tip_label: QLabel | None = None
+        self.session_panel_layout: QVBoxLayout | None = None
+        self._typography_signature: tuple[tuple[str, int], ...] | None = None
 
         self.phase_timer = QTimer(self)
         self.phase_timer.setInterval(100)
@@ -1346,23 +1429,9 @@ class MIDataCollectorWindow(QMainWindow):
         return columns
 
     def _refresh_config_group_layout(self, force: bool = False) -> None:
-        if self.config_groups_grid is None or not self.config_groups:
-            return
-        target_columns = self._desired_config_columns()
-        if not force and target_columns == self.config_grid_columns:
-            return
-        while self.config_groups_grid.count():
-            item = self.config_groups_grid.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                self.config_groups_grid.removeWidget(widget)
-        for index, group in enumerate(self.config_groups):
-            row = index // target_columns
-            column = index % target_columns
-            self.config_groups_grid.addWidget(group, row, column)
-        for column in range(4):
-            self.config_groups_grid.setColumnStretch(column, 1 if column < target_columns else 0)
-        self.config_grid_columns = target_columns
+        del force
+        if self.session_tabs is not None:
+            self.session_tabs.setDocumentMode(self.width() < 1500 or self.height() < 880)
 
     @staticmethod
     def _configure_form_layout(form: QFormLayout) -> None:
@@ -1380,7 +1449,7 @@ class MIDataCollectorWindow(QMainWindow):
     def _init_ui(self) -> None:
         self.setWindowTitle("运动想象采集台（仅采集，不判别）")
         self.resize(1700, 960)
-        self.setMinimumSize(1280, 760)
+        self.setMinimumSize(980, 640)
         self.setStyleSheet(
             """
             QMainWindow { background: #E8EEF5; }
@@ -1389,7 +1458,7 @@ class MIDataCollectorWindow(QMainWindow):
                 color: #E2E8F0;
                 border-top: 1px solid #334155;
             }
-            QLabel { color: #102A43; font-size: 12px; }
+            QLabel { color: #102A43; }
             QGroupBox {
                 font-weight: 600;
                 border: 1px solid #D5DFEB;
@@ -1465,30 +1534,51 @@ class MIDataCollectorWindow(QMainWindow):
                 background: #0F766E;
                 border-radius: 9px;
             }
+            QTabWidget::pane {
+                border: 1px solid #D5DFEB;
+                border-radius: 14px;
+                background: #FFFFFF;
+                top: -1px;
+            }
+            QTabBar::tab {
+                min-width: 64px;
+                padding: 8px 14px;
+                margin-right: 4px;
+                border: 1px solid #D5DFEB;
+                border-bottom: none;
+                border-top-left-radius: 10px;
+                border-top-right-radius: 10px;
+                background: #F8FAFC;
+                color: #475569;
+            }
+            QTabBar::tab:selected {
+                background: #FFFFFF;
+                color: #0F172A;
+            }
             """
         )
 
         central = QWidget()
         self.setCentralWidget(central)
-        root_layout = QVBoxLayout(central)
-        root_layout.setContentsMargins(18, 18, 18, 18)
-        root_layout.setSpacing(14)
+        self.root_layout = QVBoxLayout(central)
+        self.root_layout.setContentsMargins(18, 18, 18, 18)
+        self.root_layout.setSpacing(14)
 
         self.hero_title_label = QLabel("运动想象数据采集（纯采集，不判别）")
         self.hero_title_label.setFont(QFont("Microsoft YaHei", 20, QFont.Bold))
         self.hero_title_label.setStyleSheet("color: #0F172A; letter-spacing: 1px;")
-        root_layout.addWidget(self.hero_title_label)
+        self.root_layout.addWidget(self.hero_title_label)
 
         self.hero_subtitle_label = QLabel("当前版本按标准试次流程工作：每个试次都包含准备、提示、想象和休息，只负责事件标记与数据保存。")
         self.hero_subtitle_label.setWordWrap(True)
         self.hero_subtitle_label.setStyleSheet(
-            "color: #334155; font-size: 13px; background: #FFFFFF; border: 1px solid #D5DFEB; border-radius: 10px; padding: 8px 12px;"
+            "color: #334155; background: #FFFFFF; border: 1px solid #D5DFEB; border-radius: 10px; padding: 8px 12px;"
         )
-        root_layout.addWidget(self.hero_subtitle_label)
+        self.root_layout.addWidget(self.hero_subtitle_label)
 
-        body = QHBoxLayout()
-        body.setSpacing(14)
-        root_layout.addLayout(body, stretch=1)
+        self.body_layout = QHBoxLayout()
+        self.body_layout.setSpacing(14)
+        self.root_layout.addLayout(self.body_layout, stretch=1)
         self.main_splitter = QSplitter(Qt.Horizontal)
         self.main_splitter.setChildrenCollapsible(False)
         self.config_panel_widget = self._build_config_panel()
@@ -1499,7 +1589,7 @@ class MIDataCollectorWindow(QMainWindow):
         self.main_splitter.setStretchFactor(1, 4)
         self.main_splitter.setSizes([1080, 760])
         self.main_splitter.splitterMoved.connect(lambda _pos, _idx: self._refresh_config_group_layout())
-        body.addWidget(self.main_splitter, stretch=1)
+        self.body_layout.addWidget(self.main_splitter, stretch=1)
 
         self.operator_preview_panel = self._build_focus_panel()
         self.operator_preview_panel.setParent(self)
@@ -1513,31 +1603,240 @@ class MIDataCollectorWindow(QMainWindow):
         self.log_text.setReadOnly(True)
         self.log_text.setMinimumHeight(92)
         log_layout.addWidget(self.log_text)
-        root_layout.addWidget(self.log_group, stretch=0)
+        self.root_layout.addWidget(self.log_group, stretch=0)
 
+        self._apply_responsive_typography()
         self.statusBar().showMessage("准备就绪")
         self._update_responsive_chrome()
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
+        self._apply_responsive_typography()
         self._refresh_config_group_layout()
         self._update_responsive_chrome()
+        self._refresh_preview_text_heights()
 
     def _update_responsive_chrome(self) -> None:
         compact = self.height() < 880 or self.width() < 1500
+        ultra_compact = self.height() < 720 or self.width() < 1100
+        stacked = self.width() < 900
+        if self.root_layout is not None:
+            self.root_layout.setContentsMargins(10 if ultra_compact else 14 if compact else 18, 10 if ultra_compact else 14 if compact else 18, 10 if ultra_compact else 14 if compact else 18, 10 if ultra_compact else 14 if compact else 18)
+            self.root_layout.setSpacing(8 if ultra_compact else 10 if compact else 14)
+        if self.body_layout is not None:
+            self.body_layout.setSpacing(8 if ultra_compact else 10 if compact else 14)
         if self.hero_subtitle_label is not None:
-            self.hero_subtitle_label.setVisible(not compact)
+            self.hero_subtitle_label.setVisible(not ultra_compact)
+        if self.config_tip_label is not None:
+            self.config_tip_label.setVisible(not ultra_compact)
+        if self.log_group is not None:
+            self.log_group.setVisible(not ultra_compact)
         if self.log_text is not None:
-            self.log_text.setMinimumHeight(76 if compact else 92)
+            self.log_text.setMinimumHeight(64 if ultra_compact else 72 if compact else 92)
         if self.main_splitter is not None:
-            if compact:
-                self.main_splitter.setStretchFactor(0, 7)
-                self.main_splitter.setStretchFactor(1, 3)
+            desired_orientation = Qt.Vertical if stacked else Qt.Horizontal
+            if self.main_splitter.orientation() != desired_orientation:
+                self.main_splitter.setOrientation(desired_orientation)
+                if desired_orientation == Qt.Vertical:
+                    self.main_splitter.setSizes([int(self.height() * 0.40), int(self.height() * 0.60)])
+                else:
+                    self.main_splitter.setSizes([1080, 760])
+                self._refresh_config_group_layout(force=True)
+            if stacked:
+                self.main_splitter.setStretchFactor(0, 4)
+                self.main_splitter.setStretchFactor(1, 6)
+            elif compact:
+                self.main_splitter.setStretchFactor(0, 5)
+                self.main_splitter.setStretchFactor(1, 5)
             else:
                 self.main_splitter.setStretchFactor(0, 6)
                 self.main_splitter.setStretchFactor(1, 4)
         if self.preview_widget is not None:
-            self.preview_widget.setMinimumHeight(460 if compact else 560)
+            self.preview_widget.setMinimumHeight(260 if ultra_compact else 320 if compact else 420)
+        if self.session_panel_layout is not None:
+            if ultra_compact:
+                self.session_panel_layout.setStretch(0, 4)
+                self.session_panel_layout.setStretch(1, 3)
+            elif compact:
+                self.session_panel_layout.setStretch(0, 5)
+                self.session_panel_layout.setStretch(1, 3)
+            else:
+                self.session_panel_layout.setStretch(0, 5)
+                self.session_panel_layout.setStretch(1, 2)
+        if self.session_tabs is not None:
+            self.session_tabs.setDocumentMode(compact)
+            self.session_tabs.tabBar().setExpanding(True)
+        if self.protocol_text_label is not None:
+            protocol_text = self._protocol_copy(compact=compact, ultra_compact=ultra_compact)
+            if self.protocol_text_label.text() != protocol_text:
+                self.protocol_text_label.setText(protocol_text)
+
+    def _protocol_copy(self, *, compact: bool, ultra_compact: bool) -> str:
+        if ultra_compact:
+            return (
+                "操作员：先完成连接质量检查，再开始正式采集。\n"
+                "流程：静息/伪迹校准 → 想象训练 → 主任务 → 无控制/连续仿真。\n"
+                "单试次默认：注视 2s → 提示 1s → 想象 4s → 放松 2.5s。"
+            )
+        if compact:
+            return (
+                "操作员：连接后先检查波形和接触质量，稳定后开始正式采集。\n"
+                "流程：静息/伪迹校准 → 想象训练 → 多轮次主任务 → 无控制 → 连续仿真。\n"
+                "连续仿真插在 MI run 边界；单试次默认：注视 2s → 提示 1s → 想象 4s → 放松 2.5s。"
+            )
+        return (
+            "操作员流程：连接设备后先在当前界面观察原始波形并调整参数，确认稳定后再开始正式采集。\n"
+            "正式流程：静息/伪迹校准 → 想象训练 → 多轮次主任务 → 无控制 → 连续仿真。\n"
+            "连续仿真默认会按 MI run 边界拆开插入，不再全部堆到最后。\n"
+            "主任务单试次固定顺序：注视 2s → 提示(1s) → 想象(4s) → 放松(2.5s)。\n"
+            "点击开始后，如勾选受试者全屏，当前屏幕会直接切到受试者提示界面。"
+        )
+
+    def _refresh_preview_text_heights(self) -> None:
+        label_specs = (
+            (self.preview_status_label, 24, 46),
+            (self.preview_mode_label, 12, 22),
+            (self.protocol_text_label, 24, 120),
+        )
+        for label, padding, minimum in label_specs:
+            if label is None:
+                continue
+            available_width = max(
+                220,
+                label.contentsRect().width()
+                if label.width() > 0 and label.contentsRect().width() > 0
+                else label.sizeHint().width(),
+            )
+            text_rect = label.fontMetrics().boundingRect(
+                QRect(0, 0, available_width, 2000),
+                int(label.alignment()) | Qt.TextWordWrap,
+                label.text(),
+            )
+            label.setMinimumHeight(max(int(minimum), int(text_rect.height() + padding)))
+            label.updateGeometry()
+
+    def _build_typography_profile(self) -> dict[str, int]:
+        width = max(1, self.width())
+        height = max(1, self.height())
+        if width >= 1600 and height >= 900:
+            return {
+                "form": 14,
+                "section": 14,
+                "small": 13,
+                "tab": 14,
+                "button": 14,
+                "button_height": 38,
+                "group": 14,
+                "hero": 26,
+                "phase": 27,
+                "countdown": 21,
+                "instruction": 17,
+                "banner": 16,
+            }
+        if width >= 1400 and height >= 820:
+            return {
+                "form": 13,
+                "section": 14,
+                "small": 12,
+                "tab": 13,
+                "button": 13,
+                "button_height": 36,
+                "group": 13,
+                "hero": 24,
+                "phase": 25,
+                "countdown": 20,
+                "instruction": 16,
+                "banner": 15,
+            }
+        return {
+            "form": 12,
+            "section": 13,
+            "small": 12,
+            "tab": 12,
+            "button": 12,
+            "button_height": 34,
+            "group": 12,
+            "hero": 22,
+            "phase": 24,
+            "countdown": 19,
+            "instruction": 15,
+            "banner": 14,
+        }
+
+    def _apply_responsive_typography(self) -> None:
+        profile = self._build_typography_profile()
+        signature = tuple(sorted(profile.items()))
+        if signature == self._typography_signature:
+            return
+        self._typography_signature = signature
+
+        self.setFont(QFont("Microsoft YaHei", int(profile["form"])))
+
+        group_font = QFont("Microsoft YaHei", int(profile["group"]), QFont.DemiBold)
+        for group in self.findChildren(QGroupBox):
+            group.setFont(group_font)
+
+        form_font = QFont("Microsoft YaHei", int(profile["form"]))
+        for widget_type in (QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QCheckBox):
+            for widget in self.findChildren(widget_type):
+                widget.setFont(form_font)
+
+        for text_edit in self.findChildren(QTextEdit):
+            if text_edit is self.log_text:
+                text_edit.setFont(QFont("Consolas", max(12, int(profile["form"]))))
+            else:
+                text_edit.setFont(form_font)
+
+        button_font = QFont("Microsoft YaHei", int(profile["button"]), QFont.DemiBold)
+        for button in self.findChildren(QPushButton):
+            button.setFont(button_font)
+            button.setMinimumHeight(max(button.minimumHeight(), int(profile["button_height"])))
+
+        tab_font = QFont("Microsoft YaHei", int(profile["tab"]), QFont.DemiBold)
+        if self.config_section_combo is not None:
+            self.config_section_combo.setFont(tab_font)
+        if self.session_tabs is not None:
+            self.session_tabs.tabBar().setFont(tab_font)
+
+        if self.hero_title_label is not None:
+            self.hero_title_label.setFont(QFont("Microsoft YaHei", int(profile["hero"]), QFont.Bold))
+        if self.hero_subtitle_label is not None:
+            self.hero_subtitle_label.setFont(QFont("Microsoft YaHei", int(profile["section"])))
+        if self.protocol_text_label is not None:
+            self.protocol_text_label.setFont(QFont("Microsoft YaHei", int(profile["section"])))
+        if self.config_tip_label is not None:
+            self.config_tip_label.setFont(QFont("Microsoft YaHei", int(profile["small"])))
+
+        detail_font = QFont("Microsoft YaHei", int(profile["section"]))
+        for label in (
+            self.device_label,
+            self.summary_label,
+            self.current_label,
+            self.sequence_summary_label,
+            self.accepted_label,
+            self.rejected_label,
+            self.preview_status_label,
+            self.sequence_label,
+        ):
+            if label is not None:
+                label.setFont(detail_font)
+
+        if self.preview_mode_label is not None:
+            self.preview_mode_label.setFont(QFont("Microsoft YaHei", int(profile["section"]), QFont.DemiBold))
+        if self.sequence_hint_label is not None:
+            self.sequence_hint_label.setFont(QFont("Microsoft YaHei", int(profile["small"])))
+        if self.progress_text is not None:
+            self.progress_text.setFont(QFont("Microsoft YaHei", int(profile["small"])))
+        if self.next_task_label is not None:
+            self.next_task_label.setFont(QFont("Microsoft YaHei", int(profile["small"])))
+        if self.trial_banner_label is not None:
+            self.trial_banner_label.setFont(QFont("Microsoft YaHei", int(profile["banner"]), QFont.DemiBold))
+        if self.instruction_label is not None:
+            self.instruction_label.setFont(QFont("Microsoft YaHei", int(profile["instruction"])))
+        if self.phase_label is not None:
+            self.phase_label.setFont(QFont("Microsoft YaHei", int(profile["phase"]), QFont.Bold))
+        if self.countdown_label is not None:
+            self.countdown_label.setFont(QFont("Microsoft YaHei", int(profile["countdown"]), QFont.Bold))
 
     def _build_config_panel(self) -> QWidget:
         panel = QWidget()
@@ -1600,7 +1899,7 @@ class MIDataCollectorWindow(QMainWindow):
         self.save_epochs_check = QCheckBox("同时导出 *_epochs.npz（自动编号）")
         self.separate_screen_check = QCheckBox("开始采集后弹出受试者全屏提示窗")
         self.notes_edit = QTextEdit()
-        self.notes_edit.setMinimumHeight(88)
+        self.notes_edit.setMinimumHeight(64)
         self.run_count_spin = QSpinBox()
         self.run_count_spin.setRange(1, 12)
         self.max_consecutive_spin = QSpinBox()
@@ -1691,12 +1990,20 @@ class MIDataCollectorWindow(QMainWindow):
         session_form.addRow("被试编号/名称", self.subject_edit)
         session_form.addRow("会话编号", self.session_edit)
         session_form.addRow("输出目录", output_widget)
-        session_form.addRow("状态（主观）", self.participant_state_combo)
-        session_form.addRow("咖啡/茶", self.caffeine_combo)
-        session_form.addRow("刚运动", self.exercise_combo)
-        session_form.addRow("睡眠备注", self.sleep_edit)
-        session_form.addRow("参考电极设置", self.reference_edit)
-        session_form.addRow("备注", self.notes_edit)
+
+        participant_group = QGroupBox("主观状态")
+        participant_form = QFormLayout(participant_group)
+        self._configure_form_layout(participant_form)
+        participant_form.addRow("状态（主观）", self.participant_state_combo)
+        participant_form.addRow("咖啡/茶", self.caffeine_combo)
+        participant_form.addRow("刚运动", self.exercise_combo)
+        participant_form.addRow("睡眠备注", self.sleep_edit)
+        participant_form.addRow("参考电极设置", self.reference_edit)
+
+        notes_group = QGroupBox("备注")
+        notes_form = QFormLayout(notes_group)
+        self._configure_form_layout(notes_form)
+        notes_form.addRow("实验备注", self.notes_edit)
 
         board_group = QGroupBox("设备参数")
         board_form = QFormLayout(board_group)
@@ -1706,7 +2013,7 @@ class MIDataCollectorWindow(QMainWindow):
         board_form.addRow("通道名称", self.channel_names_edit)
         board_form.addRow("通道位置", self.channel_positions_edit)
 
-        timing_group = QGroupBox("试次流程")
+        timing_group = QGroupBox("MI 试次流程")
         timing_form = QFormLayout(timing_group)
         self._configure_form_layout(timing_form)
         timing_form.addRow("每类试次数", self.trials_spin)
@@ -1714,43 +2021,59 @@ class MIDataCollectorWindow(QMainWindow):
         timing_form.addRow("提示阶段（秒）", self.cue_spin)
         timing_form.addRow("想象阶段（秒）", self.imagery_spin)
         timing_form.addRow("休息阶段（秒）", self.iti_spin)
-        timing_form.addRow("轮次数量", self.run_count_spin)
-        timing_form.addRow("同类最多连续", self.max_consecutive_spin)
-        timing_form.addRow("轮次休息（秒）", self.run_rest_spin)
-        timing_form.addRow("每几轮加长休息", self.long_run_every_spin)
-        timing_form.addRow("加长休息（秒）", self.long_run_rest_spin)
-        timing_form.addRow("随机种子（自动）", self.seed_spin)
-        timing_form.addRow("", self.save_epochs_check)
-        timing_form.addRow("", self.separate_screen_check)
 
-        calibration_group = QGroupBox("静息/伪迹/训练")
+        run_group = QGroupBox("轮次与导出")
+        run_form = QFormLayout(run_group)
+        self._configure_form_layout(run_form)
+        run_form.addRow("轮次数量", self.run_count_spin)
+        run_form.addRow("同类最多连续", self.max_consecutive_spin)
+        run_form.addRow("轮次休息（秒）", self.run_rest_spin)
+        run_form.addRow("每几轮加长休息", self.long_run_every_spin)
+        run_form.addRow("加长休息（秒）", self.long_run_rest_spin)
+
+        export_group = QGroupBox("导出")
+        export_form = QFormLayout(export_group)
+        self._configure_form_layout(export_form)
+        export_form.addRow("随机种子（自动）", self.seed_spin)
+        export_form.addRow("", self.save_epochs_check)
+        export_form.addRow("", self.separate_screen_check)
+
+        calibration_group = QGroupBox("质量检查与静息")
         calibration_form = QFormLayout(calibration_group)
         self._configure_form_layout(calibration_form)
         calibration_form.addRow("质量检查参考（秒）", self.quality_check_spin)
         calibration_form.addRow("睁眼静息（秒）", self.calib_open_spin)
         calibration_form.addRow("闭眼静息（秒）", self.calib_closed_spin)
         calibration_form.addRow("", self.eyes_closed_for_gate_check)
-        calibration_form.addRow("眼动（秒）", self.calib_eye_spin)
-        calibration_form.addRow("眨眼（秒）", self.calib_blink_spin)
-        calibration_form.addRow("吞咽（秒）", self.calib_swallow_spin)
-        calibration_form.addRow("咬牙（秒）", self.calib_jaw_spin)
-        calibration_form.addRow("头动（秒）", self.calib_head_spin)
         calibration_form.addRow("想象训练（秒）", self.practice_spin)
-        calibration_form.addRow("伪迹类型", self.artifact_types_edit)
 
-        post_group = QGroupBox("无控制与连续模式")
+        artifact_group = QGroupBox("伪迹校准")
+        artifact_form = QFormLayout(artifact_group)
+        self._configure_form_layout(artifact_form)
+        artifact_form.addRow("眼动（秒）", self.calib_eye_spin)
+        artifact_form.addRow("眨眼（秒）", self.calib_blink_spin)
+        artifact_form.addRow("吞咽（秒）", self.calib_swallow_spin)
+        artifact_form.addRow("咬牙（秒）", self.calib_jaw_spin)
+        artifact_form.addRow("头动（秒）", self.calib_head_spin)
+        artifact_form.addRow("伪迹类型", self.artifact_types_edit)
+
+        post_group = QGroupBox("无控制")
         post_form = QFormLayout(post_group)
         self._configure_form_layout(post_form)
         post_form.addRow("无控制段数", self.idle_count_spin)
         post_form.addRow("无控制时长（秒）", self.idle_sec_spin)
         post_form.addRow("仅准备不执行段数", self.idle_prepare_count_spin)
         post_form.addRow("仅准备不执行时长（秒）", self.idle_prepare_spin)
-        post_form.addRow("连续模式段数", self.continuous_count_spin)
-        post_form.addRow("连续模式时长（秒）", self.continuous_sec_spin)
-        post_form.addRow("命令最短时长（秒）", self.cont_cmd_min_spin)
-        post_form.addRow("命令最长时长（秒）", self.cont_cmd_max_spin)
-        post_form.addRow("命令间隔最短（秒）", self.cont_gap_min_spin)
-        post_form.addRow("命令间隔最长（秒）", self.cont_gap_max_spin)
+
+        continuous_group = QGroupBox("连续模式")
+        continuous_form = QFormLayout(continuous_group)
+        self._configure_form_layout(continuous_form)
+        continuous_form.addRow("连续模式段数", self.continuous_count_spin)
+        continuous_form.addRow("连续模式时长（秒）", self.continuous_sec_spin)
+        continuous_form.addRow("命令最短时长（秒）", self.cont_cmd_min_spin)
+        continuous_form.addRow("命令最长时长（秒）", self.cont_cmd_max_spin)
+        continuous_form.addRow("命令间隔最短（秒）", self.cont_gap_min_spin)
+        continuous_form.addRow("命令间隔最长（秒）", self.cont_gap_max_spin)
 
         control_group = QGroupBox("操作")
         control_layout = QGridLayout(control_group)
@@ -1776,36 +2099,67 @@ class MIDataCollectorWindow(QMainWindow):
         self.disconnect_button.clicked.connect(self.disconnect_device)
         control_layout.addWidget(self.connect_button, 0, 0)
         control_layout.addWidget(self.start_button, 0, 1)
-        control_layout.addWidget(self.pause_button, 1, 0)
-        control_layout.addWidget(self.bad_trial_button, 1, 1)
-        control_layout.addWidget(self.stop_button, 2, 0)
-        control_layout.addWidget(self.disconnect_button, 2, 1)
+        control_layout.addWidget(self.pause_button, 0, 2)
+        control_layout.addWidget(self.bad_trial_button, 1, 0)
+        control_layout.addWidget(self.stop_button, 1, 1)
+        control_layout.addWidget(self.disconnect_button, 1, 2)
         control_layout.setColumnStretch(0, 1)
         control_layout.setColumnStretch(1, 1)
+        control_layout.setColumnStretch(2, 1)
         self.config_groups = [
             session_group,
+            participant_group,
+            notes_group,
             board_group,
             timing_group,
+            run_group,
+            export_group,
             calibration_group,
+            artifact_group,
             post_group,
-            control_group,
+            continuous_group,
         ]
-        self.config_groups_grid = QGridLayout()
-        self.config_groups_grid.setContentsMargins(0, 0, 0, 0)
-        self.config_groups_grid.setHorizontalSpacing(8)
-        self.config_groups_grid.setVerticalSpacing(8)
-        layout.addLayout(self.config_groups_grid, stretch=1)
+        section_row = QHBoxLayout()
+        section_row.setContentsMargins(0, 0, 0, 0)
+        section_row.setSpacing(8)
+        section_label = QLabel("配置分区")
+        section_label.setStyleSheet("color: #475569;")
+        self.config_section_combo = QComboBox()
+        self.config_section_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.config_stack = QStackedWidget()
+        config_sections = [
+            ("会话", session_group),
+            ("状态", participant_group),
+            ("备注", notes_group),
+            ("设备", board_group),
+            ("MI", timing_group),
+            ("轮次", run_group),
+            ("导出", export_group),
+            ("静息", calibration_group),
+            ("伪迹", artifact_group),
+            ("无控制", post_group),
+            ("连续", continuous_group),
+        ]
+        for title, group in config_sections:
+            self.config_section_combo.addItem(title)
+            self.config_stack.addWidget(group)
+        self.config_section_combo.currentIndexChanged.connect(self.config_stack.setCurrentIndex)
+        section_row.addWidget(section_label, stretch=0)
+        section_row.addWidget(self.config_section_combo, stretch=1)
+        layout.addLayout(section_row)
+        layout.addWidget(self.config_stack, stretch=1)
+        control_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        layout.addWidget(control_group, stretch=0)
         self._refresh_config_group_layout(force=True)
 
-        tip = QLabel(
+        self.config_tip_label = QLabel(
             "连接设备后先在右侧原始波形面板完成实验员测试；若勾选“弹出受试者全屏提示窗”，点击“开始采集”后会直接切到受试者全屏。"
             "运行中快捷键：空格 暂停/继续，B 标记坏试次（连续模式下标记命令失败），"
             "N 提前结束训练/质检阶段，Esc 停止并保存。"
         )
-        tip.setWordWrap(True)
-        tip.setStyleSheet("color: #475569; font-size: 12px; padding: 4px;")
-        layout.addWidget(tip)
-        layout.addStretch(1)
+        self.config_tip_label.setWordWrap(True)
+        self.config_tip_label.setStyleSheet("color: #475569; padding: 4px;")
+        layout.addWidget(self.config_tip_label)
         return panel
 
     def _build_focus_panel(self) -> QWidget:
@@ -1830,7 +2184,7 @@ class MIDataCollectorWindow(QMainWindow):
         self.countdown_label = QLabel("剩余时间：--")
         self.countdown_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.countdown_label.setStyleSheet(
-            "color: #334155; font-size: 18px; font-weight: bold; "
+            "color: #334155; font-weight: bold; "
             "background: #F8FAFC; border: 1px solid #CBD5E1; border-radius: 12px; padding: 10px 14px;"
         )
         header_row.addWidget(self.countdown_label, stretch=0)
@@ -1838,7 +2192,7 @@ class MIDataCollectorWindow(QMainWindow):
 
         self.trial_banner_label = QLabel("当前试次：未开始")
         self.trial_banner_label.setStyleSheet(
-            "color: #1E293B; font-size: 14px; background: #EEF2FF; border-radius: 10px; padding: 8px 10px;"
+            "color: #1E293B; background: #EEF2FF; border-radius: 10px; padding: 8px 10px;"
         )
         cue_layout.addWidget(self.trial_banner_label)
 
@@ -1848,7 +2202,7 @@ class MIDataCollectorWindow(QMainWindow):
         self.instruction_label = QLabel("连接设备后点击“开始采集”。")
         self.instruction_label.setWordWrap(True)
         self.instruction_label.setStyleSheet(
-            "font-size: 15px; color: #0F172A; background: #FFFFFF; border: 1px solid #CBD5E1; border-radius: 12px; padding: 12px;"
+            "color: #0F172A; background: #FFFFFF; border: 1px solid #CBD5E1; border-radius: 12px; padding: 12px;"
         )
         cue_layout.addWidget(self.instruction_label)
 
@@ -1859,12 +2213,12 @@ class MIDataCollectorWindow(QMainWindow):
 
         footer_row = QHBoxLayout()
         self.progress_text = QLabel("总进度：0 / 0")
-        self.progress_text.setStyleSheet("color: #475569; font-size: 12px;")
+        self.progress_text.setStyleSheet("color: #475569;")
         footer_row.addWidget(self.progress_text, stretch=1)
 
         self.next_task_label = QLabel("下一任务：--")
         self.next_task_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        self.next_task_label.setStyleSheet("color: #475569; font-size: 12px;")
+        self.next_task_label.setStyleSheet("color: #475569;")
         footer_row.addWidget(self.next_task_label, stretch=0)
         cue_layout.addLayout(footer_row)
 
@@ -1873,25 +2227,19 @@ class MIDataCollectorWindow(QMainWindow):
 
     def _build_session_panel(self) -> QWidget:
         panel = QWidget()
-        layout = QVBoxLayout(panel)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(14)
+        self.session_panel_layout = QVBoxLayout(panel)
+        self.session_panel_layout.setContentsMargins(0, 0, 0, 0)
+        self.session_panel_layout.setSpacing(14)
 
         protocol_group = QGroupBox("实验逻辑")
         protocol_layout = QVBoxLayout(protocol_group)
-        protocol_text = QLabel(
-            "操作员流程：连接设备后先在当前界面观察原始波形并调整参数，确认稳定后再开始正式采集。\n"
-            "正式流程：静息/伪迹校准 → 想象训练 → 多轮次主任务 → "
-            "无控制 → 连续仿真。\n"
-            "连续仿真默认会按 MI run 边界拆开插入，不再全部堆到最后。\n"
-            "主任务单试次固定顺序：注视(2秒) → 提示(1秒) → 想象(4秒) → 放松(2.5秒)。\n"
-            "点击开始后，如勾选受试者全屏，当前屏幕会直接切到受试者提示界面。"
-        )
-        protocol_text.setWordWrap(True)
-        protocol_text.setStyleSheet("font-size: 13px; color: #334155;")
-        protocol_layout.addWidget(protocol_text)
-        protocol_group.setMaximumHeight(200)
-        layout.addWidget(protocol_group)
+        self.protocol_text_label = QLabel(self._protocol_copy(compact=False, ultra_compact=False))
+        self.protocol_text_label.setWordWrap(True)
+        self.protocol_text_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        self.protocol_text_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        self.protocol_text_label.setStyleSheet("color: #334155;")
+        protocol_layout.addWidget(self.protocol_text_label)
+        protocol_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
 
         status_group = QGroupBox("当前状态")
         status_layout = QVBoxLayout(status_group)
@@ -1910,25 +2258,32 @@ class MIDataCollectorWindow(QMainWindow):
             self.rejected_label,
         ):
             label.setWordWrap(True)
-            label.setStyleSheet("font-size: 13px; color: #1E293B;")
+            label.setStyleSheet("color: #1E293B;")
             status_layout.addWidget(label)
         status_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
 
         preview_group = QGroupBox("连接后质量检查（EEG / 阻抗，5 秒窗）")
         preview_layout = QVBoxLayout(preview_group)
         self.preview_status_label = QLabel(
-            "连接设备后先做质量检查：可在 EEG/阻抗模式切换，确认无掉线、坏道、饱和、异常漂移和接触不良。"
+            "连接后先在这里做质量检查。EEG 预览采用 FBCCA 风格的仅显示预处理，采集保存的数据始终保持原始数据。"
         )
         self.preview_status_label.setWordWrap(True)
+        self.preview_status_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        self.preview_status_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         self.preview_status_label.setStyleSheet(
-            "font-size: 13px; color: #334155; background: #F8FAFC; border-radius: 8px; padding: 8px 10px;"
+            "color: #334155; background: #F8FAFC; border-radius: 8px; padding: 8px 10px;"
         )
         preview_layout.addWidget(self.preview_status_label)
 
-        preview_control_layout = QHBoxLayout()
-        self.preview_mode_label = QLabel("Quality mode: waiting for device")
-        self.preview_mode_label.setStyleSheet("font-size: 13px; color: #0F172A; font-weight: 600;")
-        preview_control_layout.addWidget(self.preview_mode_label, 1)
+        preview_control_layout = QGridLayout()
+        preview_control_layout.setHorizontalSpacing(8)
+        preview_control_layout.setVerticalSpacing(8)
+        self.preview_mode_label = QLabel("质量检查模式：等待设备连接")
+        self.preview_mode_label.setWordWrap(True)
+        self.preview_mode_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.preview_mode_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        self.preview_mode_label.setStyleSheet("color: #0F172A; font-weight: 600;")
+        preview_control_layout.addWidget(self.preview_mode_label, 0, 0, 1, 3)
 
         self.preview_to_eeg_button = QPushButton("EEG模式")
         self.preview_to_imp_button = QPushButton("阻抗模式")
@@ -1943,6 +2298,7 @@ class MIDataCollectorWindow(QMainWindow):
             self.preview_reset_button,
         ):
             button.setMinimumHeight(34)
+            button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             button.setEnabled(False)
 
         self.preview_to_eeg_button.clicked.connect(self.on_preview_to_eeg_clicked)
@@ -1951,33 +2307,41 @@ class MIDataCollectorWindow(QMainWindow):
         self.preview_next_ch_button.clicked.connect(self.on_preview_next_channel_clicked)
         self.preview_reset_button.clicked.connect(self.on_preview_reset_clicked)
 
-        preview_control_layout.addWidget(self.preview_to_eeg_button)
-        preview_control_layout.addWidget(self.preview_to_imp_button)
-        preview_control_layout.addWidget(self.preview_prev_ch_button)
-        preview_control_layout.addWidget(self.preview_next_ch_button)
-        preview_control_layout.addWidget(self.preview_reset_button)
+        preview_control_layout.addWidget(self.preview_to_eeg_button, 1, 0)
+        preview_control_layout.addWidget(self.preview_to_imp_button, 1, 1)
+        preview_control_layout.addWidget(self.preview_reset_button, 1, 2)
+        preview_control_layout.addWidget(self.preview_prev_ch_button, 2, 0)
+        preview_control_layout.addWidget(self.preview_next_ch_button, 2, 1)
+        preview_control_layout.setColumnStretch(0, 1)
+        preview_control_layout.setColumnStretch(1, 1)
+        preview_control_layout.setColumnStretch(2, 1)
         preview_layout.addLayout(preview_control_layout)
 
         self.preview_widget = RealtimeEEGPreviewWidget(window_seconds=5.0)
-        self.preview_widget.setMinimumHeight(560)
+        self.preview_widget.setMinimumHeight(420)
         preview_layout.addWidget(self.preview_widget, stretch=1)
-        layout.addWidget(preview_group, stretch=4)
-        layout.addWidget(status_group, stretch=0)
+        self.session_panel_layout.addWidget(preview_group, stretch=5)
 
         order_group = QGroupBox("试次安排")
         order_layout = QVBoxLayout(order_group)
         self.sequence_hint_label = QLabel("灰色：未开始  蓝边：当前试次  实色：已完成  删除线：坏试次")
         self.sequence_hint_label.setWordWrap(True)
-        self.sequence_hint_label.setStyleSheet("font-size: 12px; color: #64748B; background: #F8FAFC; border-radius: 8px; padding: 6px 8px;")
+        self.sequence_hint_label.setStyleSheet("color: #64748B; background: #F8FAFC; border-radius: 8px; padding: 6px 8px;")
         order_layout.addWidget(self.sequence_hint_label)
         self.sequence_label = QLabel("当前还未生成试次顺序。")
         self.sequence_label.setWordWrap(True)
         self.sequence_label.setTextFormat(Qt.RichText)
         self.sequence_label.setStyleSheet(
-            "font-size: 13px; color: #334155; background: #FFFFFF; border: 1px solid #E2E8F0; border-radius: 10px; padding: 10px;"
+            "color: #334155; background: #FFFFFF; border: 1px solid #E2E8F0; border-radius: 10px; padding: 10px;"
         )
         order_layout.addWidget(self.sequence_label)
-        layout.addWidget(order_group, stretch=1)
+        self.session_tabs = QTabWidget()
+        self.session_tabs.setUsesScrollButtons(False)
+        self.session_tabs.addTab(status_group, "状态")
+        self.session_tabs.addTab(order_group, "试次")
+        self.session_tabs.addTab(protocol_group, "说明")
+        self.session_tabs.currentChanged.connect(lambda _index: self._refresh_preview_text_heights())
+        self.session_panel_layout.addWidget(self.session_tabs, stretch=2)
         return panel
 
     def apply_default_values(self) -> None:
@@ -2450,11 +2814,11 @@ class MIDataCollectorWindow(QMainWindow):
             f"color: #FFFFFF; background: {accent}; border-radius: 14px; padding: 8px 14px;"
         )
         self.countdown_label.setStyleSheet(
-            f"color: #1E293B; font-size: 18px; font-weight: bold; "
+            f"color: #1E293B; font-weight: bold; "
             f"background: #F8FAFC; border: 1px solid {accent}; border-radius: 12px; padding: 10px 14px;"
         )
         self.instruction_label.setStyleSheet(
-            f"font-size: 15px; color: #0F172A; background: #FFFFFF; "
+            f"color: #0F172A; background: #FFFFFF; "
             f"border: 1px solid {accent}; border-radius: 12px; padding: 12px;"
         )
         self.progress_bar.setStyleSheet(
@@ -2492,12 +2856,14 @@ class MIDataCollectorWindow(QMainWindow):
         if self.preview_mode_label is None:
             return
         if self.device_info is None:
-            self.preview_mode_label.setText("Quality mode: waiting for device")
+            self.preview_mode_label.setText("质量检查模式：等待设备连接")
+            self._refresh_preview_text_heights()
             return
         if self.preview_mode == RealtimeEEGPreviewWidget.MODE_IMPEDANCE:
-            self.preview_mode_label.setText(f"Quality mode: IMPEDANCE (CH{self.preview_impedance_channel})")
+            self.preview_mode_label.setText(f"质量检查模式：阻抗（CH{self.preview_impedance_channel}）")
         else:
-            self.preview_mode_label.setText("Quality mode: EEG (filtered display only; saving stays raw)")
+            self.preview_mode_label.setText("质量检查模式：EEG（FBCCA 风格仅显示预处理；保存保持原始）")
+        self._refresh_preview_text_heights()
 
     def _apply_preview_mode_locally(self, mode: str, *, channel: int | None = None) -> None:
         normalized = (
@@ -2615,22 +2981,27 @@ class MIDataCollectorWindow(QMainWindow):
 
         suggested_seconds = 0.0 if not hasattr(self, "quality_check_spin") else float(self.quality_check_spin.value())
         if self.preview_mode == RealtimeEEGPreviewWidget.MODE_IMPEDANCE:
-            mode_hint = f"当前模式：阻抗模式（CH{self.preview_impedance_channel}，原始波形，不滤波）。"
+            mode_hint = f"当前模式：阻抗模式（CH{self.preview_impedance_channel}），显示原始波形，便于直接判断接触质量。"
         else:
-            mode_hint = "当前模式：EEG模式（仅用于可视化滤波；保存始终为原始数据）。"
+            mode_hint = (
+                "当前模式：EEG 模式，仅用于显示的预处理为：(raw - 3Hz 低通基线) + 50Hz 陷波 + 去均值；"
+                "实际保存的数据始终保持原始采集值。"
+            )
 
         if self.device_info is None:
             self.preview_status_label.setText(
-                f"连接设备后开始质量检查。{mode_hint} 建议先观察约 {suggested_seconds:.0f} 秒，确认无掉线、坏道、饱和和异常漂移。"
+                f"连接设备后开始质量检查。建议先观察约 {suggested_seconds:.0f} 秒，确认无掉线、坏道、饱和、异常漂移和接触不良。{mode_hint}"
             )
             self._set_preview_mode_label()
+            self._refresh_preview_text_heights()
             return
 
         if self.current_phase == "quality_check":
             self.preview_status_label.setText(
-                f"质量检查中：请观察波形稳定性并检查接触质量。{mode_hint}"
+                f"质量检查中：请观察波形稳定性、通道状态和接触质量。{mode_hint}"
             )
             self._set_preview_mode_label()
+            self._refresh_preview_text_heights()
             return
 
         if self.session_running:
@@ -2638,12 +3009,14 @@ class MIDataCollectorWindow(QMainWindow):
                 f"正式采集中：当前面板仅用于辅助监看。{mode_hint}"
             )
             self._set_preview_mode_label()
+            self._refresh_preview_text_heights()
             return
 
         self.preview_status_label.setText(
-            f"设备已连接：先完成连接后质量检查（约 {suggested_seconds:.0f} 秒）再开始采集。{mode_hint}"
+            f"设备已连接：建议先完成约 {suggested_seconds:.0f} 秒的连接质量检查，再开始正式采集。{mode_hint}"
         )
         self._set_preview_mode_label()
+        self._refresh_preview_text_heights()
 
     def _start_formal_protocol(self) -> None:
         self.record_event("calibration_start")

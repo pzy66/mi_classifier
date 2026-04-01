@@ -519,6 +519,12 @@ def _update_trials_from_events(
     records = [TrialRecord(**asdict(trial)) if isinstance(trial, TrialRecord) else TrialRecord(**trial) for trial in trial_records]
     by_id = {int(trial.trial_id): trial for trial in records}
 
+    def _set_earliest_sample(trial: TrialRecord, field_name: str, sample_index: int) -> None:
+        current_value = getattr(trial, field_name)
+        new_value = int(sample_index)
+        if current_value is None or new_value < int(current_value):
+            setattr(trial, field_name, new_value)
+
     for event in events:
         trial_id = event.get("trial_id")
         if trial_id is None:
@@ -532,11 +538,11 @@ def _update_trials_from_events(
         event_name = str(event.get("event_name"))
         trial = by_id[trial_key]
         if event_name.startswith("cue_") or event_name == "cue_start":
-            trial.cue_onset_sample = int(sample_index)
+            _set_earliest_sample(trial, "cue_onset_sample", int(sample_index))
         elif event_name == "imagery_end":
             trial.imagery_offset_sample = int(sample_index)
         elif event_name.startswith("imagery_") or event_name == "imagery_start":
-            trial.imagery_onset_sample = int(sample_index)
+            _set_earliest_sample(trial, "imagery_onset_sample", int(sample_index))
         elif event_name == "trial_end":
             trial.trial_end_sample = int(sample_index)
         elif event_name == "bad_trial_marked":
@@ -1000,13 +1006,33 @@ def save_mi_session(
                 gate_negative_intervals.append((start_sample, end_sample))
                 gate_negative_sources.append("continuous_no_control")
 
+    min_gate_negative_samples = max(1, rest_step_samples)
+    gate_negative_window_samples = int(window_samples)
+    eligible_gate_negative_lengths = [
+        int(stop - start)
+        for start, stop in gate_negative_intervals
+        if int(stop - start) >= min_gate_negative_samples
+    ]
+    if eligible_gate_negative_lengths:
+        gate_negative_window_samples = min(int(window_samples), min(eligible_gate_negative_lengths))
+
     gate_negative_windows: list[np.ndarray] = []
     gate_negative_sources_windows: list[str] = []
     for interval, source in zip(gate_negative_intervals, gate_negative_sources):
-        windows, sources = _split_intervals_to_windows(signal=eeg_volts, intervals=[interval], window_samples=window_samples, step_samples=rest_step_samples, source_name=str(source))
+        windows, sources = _split_intervals_to_windows(
+            signal=eeg_volts,
+            intervals=[interval],
+            window_samples=gate_negative_window_samples,
+            step_samples=rest_step_samples,
+            source_name=str(source),
+        )
         gate_negative_windows.extend(windows)
         gate_negative_sources_windows.extend(sources)
-    X_gate_neg = _stack_windows(gate_negative_windows, channel_count=len(channel_names), sample_count=window_samples)
+    X_gate_neg = _stack_windows(
+        gate_negative_windows,
+        channel_count=len(channel_names),
+        sample_count=gate_negative_window_samples,
+    )
     gate_neg_sources_array = np.asarray(gate_negative_sources_windows, dtype=object)
 
     hard_negative_intervals: list[tuple[int, int]] = []
