@@ -54,16 +54,17 @@ python code/collection/mi_data_collector.py --subject-id 001 --session-id 202603
 
 每次会话阶段顺序：
 
-1. 连接设备后，操作员先在当前界面观察原始波形（raw EEG、无滤波、无预处理）
+1. 连接设备后，操作员先在当前界面做质量检查（观察时长参考 `quality_check_sec`）
 2. `calibration`
-3. `practice`
-4. 前半段 `MI runs`
-5. 中途插入短 `continuous`
-6. 后半段 `MI runs`
-7. 末尾再插入短 `continuous`
-8. `idle_block`
-9. `idle_prepare`
-10. 自动保存
+3. `practice`（可操作员确认后提前结束）
+4. `MI run 1`
+5. `MI run 2`
+6. `continuous block 1`（默认插在 run 2 后）
+7. `MI run 3`
+8. `continuous block 2`（默认插在 run 3 后）
+9. `idle_block`
+10. `idle_prepare`
+11. 自动保存
 
 默认关键参数：
 
@@ -79,6 +80,15 @@ python code/collection/mi_data_collector.py --subject-id 001 --session-id 202603
 - `idle_prepare = 2 x 60s`
 - `continuous = 2 x 240s`，命令 `4-5s`、间隔 `2-3s`，默认插在完成 MI run 2 和 run 3 后
 - `include_eyes_closed_rest_in_gate_neg=False`（默认不把闭眼静息并入 gate 负类）
+
+采集时序可调建议（不改默认时可按被试个体化）：
+
+- calibration：`eye=20-30s`，`blink/swallow/jaw/head=15-20s`
+- practice：新手 `180s`，熟练者 `120s`，并可按 `N` 提前结束
+- `idle_block`：建议 `2 x 60-90s`
+- `idle_prepare`：建议 `2 x 60s` 或 `1 x 120s`
+- continuous：可在 `2 x 240s` 和 `3 x 180s` 间选择
+- continuous 命令/间隔：新手建议 `4-5s` + `2-3s`，熟练后可试 `3.5-5s` + `1.5-2.5s`
 
 continuous 参数约束：
 
@@ -100,6 +110,13 @@ continuous 参数约束：
 - 点击 `开始采集` 后，如启用受试者全屏，当前屏幕切到受试者提示界面
 - 如果关闭该选项，则整场采集都在操作员窗口显示
 
+显示滤波与保存边界（重要）：
+
+- EEG 预览窗口的滤波仅用于显示，不改变保存数据
+- 显示链路：`detrend + 1Hz 高通 + 50Hz 陷波 + 40Hz 低通`
+- 阻抗模式显示 raw，不走 EEG 显示滤波链路
+- 保存到磁盘的始终是原始采集信号 + 事件标记，训练时再统一做预处理
+
 ## 6. 采集中操作
 
 操作员按钮：
@@ -117,7 +134,7 @@ continuous 参数约束：
 - `B`：
   - trial 阶段标记坏试次
   - continuous 阶段标记当前命令失败（`execution_success=0`）
-- `N`：提前结束当前 `practice`（或 `quality_check`）阶段
+- `N`：提前结束当前 `practice`（或 `quality_check`）阶段（仅会话运行且未暂停时生效）
 - `Esc`：停止并保存
 
 提示音与暂停行为：

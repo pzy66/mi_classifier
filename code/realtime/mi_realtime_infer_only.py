@@ -6,7 +6,8 @@ runtime modes:
 - ``continuous``: classify every rolling update and show ``UNCERTAIN`` when
   the evidence does not pass the decision thresholds.
 - ``guided``: run a cue-aligned baseline -> cue -> imagery -> recovery loop
-  so online timing matches collection and training more closely.
+  so online timing matches collection and training more closely (defaults:
+  baseline/cue/imagery/iti = 2.0/1.0/4.0/2.0s).
 """
 
 from __future__ import annotations
@@ -73,10 +74,10 @@ USER_CONFIG = {
     "max_bad_channels": 1,
     "artifact_freeze_windows": 2,
     "board_channel_positions": None,
-    "protocol_baseline_sec": 4.0,
-    "protocol_cue_sec": 1.5,
-    "protocol_imagery_sec": 5.0,
-    "protocol_iti_sec": 4.0,
+    "protocol_baseline_sec": 2.0,
+    "protocol_cue_sec": 1.0,
+    "protocol_imagery_sec": 4.0,
+    "protocol_iti_sec": 2.0,
     "protocol_trials_per_class": 4,
     "protocol_random_seed": 42,
 }
@@ -786,9 +787,14 @@ class MIRealtimeWindow(QMainWindow):
 
     def mode_banner_text(self) -> str:
         if self.is_guided_mode():
+            baseline_sec = float(self.config.get("protocol_baseline_sec", 0.0))
+            cue_sec = float(self.config.get("protocol_cue_sec", 0.0))
+            imagery_sec = float(self.config.get("protocol_imagery_sec", 0.0))
+            iti_sec = float(self.config.get("protocol_iti_sec", 0.0))
             return (
-                "Guided MI session. Classification only runs during the imagery phase so online timing "
-                "matches the training windows more closely."
+                "Guided MI session (test protocol). Classification only runs during imagery. "
+                f"Current timing baseline/cue/imagery/iti={baseline_sec:.1f}/{cue_sec:.1f}/{imagery_sec:.1f}/{iti_sec:.1f}s "
+                "(collection-aligned default is 2.0/1.0/4.0/2.0s)."
             )
         return (
             "Continuous MI recognition. The classifier scores every rolling window and stays UNCERTAIN "
@@ -797,7 +803,7 @@ class MIRealtimeWindow(QMainWindow):
 
     def default_protocol_hint(self) -> str:
         if self.is_guided_mode():
-            return "The model waits until imagery starts before scoring."
+            return "Guided protocol is configurable via USER_CONFIG protocol_*; scoring starts at imagery."
         return "The classifier runs continuously and rejects low-evidence windows."
 
     def class_display_name(self, class_name: str | None) -> str:

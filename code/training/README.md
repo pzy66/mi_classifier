@@ -79,6 +79,7 @@ python code/training/train_custom_dataset.py
 ## 5. 默认关键参数
 
 - 预处理：`4-40Hz` 带通 + `50Hz` 陷波 + `CAR` + `standardize=False`
+- 统一默认来源：`code/shared/src/preprocessing.py`（`preprocess()` 与 `DEFAULT_PREPROCESS_*` 常量）
 - `window_secs=2.0,2.5,3.0`
 - `window_offset_secs=0.5,0.75`
 - FBCSP 两层：默认 filter bank `4-8,8-12,...,36-40`；`central_fbcsp_lda` 保守锚点 `8-12,...,28-32`

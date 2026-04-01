@@ -7,6 +7,11 @@ from functools import lru_cache
 import numpy as np
 from scipy import signal
 
+DEFAULT_PREPROCESS_BANDPASS = (4.0, 40.0)
+DEFAULT_PREPROCESS_NOTCH = 50.0
+DEFAULT_PREPROCESS_APPLY_CAR = True
+DEFAULT_PREPROCESS_STANDARDIZE = False
+
 
 @lru_cache(maxsize=64)
 def _cached_bandpass_sos(order: int, lowcut: float, highcut: float, fs: float) -> np.ndarray:
@@ -75,10 +80,10 @@ def preprocess(
     X: np.ndarray,
     *,
     fs: float = 250.0,
-    bandpass: tuple[float, float] | list[float] | None = (4.0, 40.0),
-    notch: float | None = 50.0,
-    apply_car: bool = True,
-    standardize_data: bool = False,
+    bandpass: tuple[float, float] | list[float] | None = DEFAULT_PREPROCESS_BANDPASS,
+    notch: float | None = DEFAULT_PREPROCESS_NOTCH,
+    apply_car: bool = DEFAULT_PREPROCESS_APPLY_CAR,
+    standardize_data: bool = DEFAULT_PREPROCESS_STANDARDIZE,
 ) -> np.ndarray:
     """Run the baseline preprocessing pipeline."""
     X = np.asarray(X, dtype=np.float32)

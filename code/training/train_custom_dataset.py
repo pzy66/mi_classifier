@@ -28,7 +28,13 @@ from src.models import (
     fit_probability_calibration,
     predict_probability_matrix,
 )
-from src.preprocessing import preprocess
+from src.preprocessing import (
+    DEFAULT_PREPROCESS_APPLY_CAR,
+    DEFAULT_PREPROCESS_BANDPASS,
+    DEFAULT_PREPROCESS_NOTCH,
+    DEFAULT_PREPROCESS_STANDARDIZE,
+    preprocess,
+)
 from src.realtime_mi import build_realtime_artifact_bank
 
 
@@ -87,10 +93,6 @@ DEFAULT_DEEP_STAGE_PRETRAIN_WINDOW_SECS = [2.5, 2.0]
 DEFAULT_DEEP_STAGE_FINETUNE_WINDOW_SECS = [2.0, 1.5]
 DEFAULT_CENTRAL_PRIOR_ALPHA = 0.75
 DEFAULT_CENTRAL_AUX_LOSS_WEIGHT = 0.3
-DEFAULT_PREPROCESS_BANDPASS = (4.0, 40.0)
-DEFAULT_PREPROCESS_NOTCH = 50.0
-DEFAULT_PREPROCESS_APPLY_CAR = True
-DEFAULT_PREPROCESS_STANDARDIZE = False
 STRICT_MAIN_SPLIT_STRATEGIES = {"group_shuffle", "session_holdout"}
 STRICT_AUX_SPLIT_STRATEGIES = {"group_shuffle", "session_holdout", "aligned_to_main_split"}
 DEFAULT_SELECTION_OBJECTIVE_SPEC = {

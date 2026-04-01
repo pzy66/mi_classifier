@@ -44,7 +44,19 @@ python run_05_channel_monitor.py
 在 `USER_CONFIG['realtime_mode']` 选择：
 
 - `continuous`：每次滑窗都输出，低证据时显示 `UNCERTAIN`
-- `guided`：按 `baseline -> cue -> imagery -> iti` 协议运行
+- `guided`：按 `baseline -> cue -> imagery -> iti` 协议运行（测试协议，可调）
+
+guided 默认时序（已与采集协议对齐）：
+
+- `protocol_baseline_sec=2.0`
+- `protocol_cue_sec=1.0`
+- `protocol_imagery_sec=4.0`
+- `protocol_iti_sec=2.0`
+
+说明：
+
+- guided 用于联调/对比，不是采集脚本本身
+- 若你改了 `protocol_*`，请把它视为“自定义测试协议”，不再等同于采集默认协议
 
 ## 4. 决策顺序
 
@@ -69,6 +81,7 @@ python run_05_channel_monitor.py
 - `use_artifact_recommended_gate_thresholds`
 - `board_id`, `serial_port`
 - `board_channel_positions`
+- guided 协议参数：`protocol_baseline_sec`, `protocol_cue_sec`, `protocol_imagery_sec`, `protocol_iti_sec`
 
 ### 重要约束
 
