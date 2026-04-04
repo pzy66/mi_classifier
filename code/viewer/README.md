@@ -1,70 +1,142 @@
-﻿# NPZ Viewer 说明
+# Viewer README
 
-`viewer/` 只用于可视化采集后的 `npz`，不参与训练或实时推理。
+`viewer/` is now a run-bundle viewer for `schema_version=2` collection outputs.
+It is no longer limited to `*_mi_epochs.npz`.
 
-## 1. 入口
+## Entry Points
 
-推荐（项目根目录）：
+Recommended from project root:
 
 ```powershell
 python run_04_view_collected_npz.py
 ```
 
-等价入口：
+Equivalent entry:
 
 ```powershell
 python code/viewer/run_npz_viewer_pycharm.py
 ```
 
-指定文件启动：
+Direct CLI:
 
 ```powershell
-python code/viewer/mi_npz_viewer.py --npz <path-to-npz>
+python code/viewer/mi_npz_viewer.py --source <session-dir-or-run-artifact>
 ```
 
-如果终端里没有 `python` 命令，请改用：
+`--npz` is still accepted as a backward-compatible alias, but it now means
+"any run-bundle path", not only `*_mi_epochs.npz`.
 
-```powershell
-& 'C:\Users\P1233\miniconda3\envs\MI\python.exe' code/viewer/mi_npz_viewer.py --help
-```
+## What 04 Scans
 
-## 2. 支持读取的文件
+Default scan target:
 
-会扫描：
+- `*_session_meta.json`
 
-- `*_epochs.npz`
-- `epochs.npz`
+You can also load any of these directly:
 
-并排除：
-
+- session directory
+- `*_session_meta.json`
+- `*_mi_epochs.npz`
 - `*_gate_epochs.npz`
 - `*_artifact_epochs.npz`
+- `*_continuous.npz`
+- `*_events.csv`
+- `*_trials.csv`
+- `*_segments.csv`
+- `*_board_data.npy`
 
-说明：viewer 面向主 MI epoch 结构（`X/y/accepted/trial_ids`），不是 gate/artifact 专用查看器。
+The viewer resolves the matching run stem and then loads the whole bundle.
 
-## 3. 主要功能
+## What 04 Reads
 
-- 最近文件自动扫描与选择
-- Trial / 类别 / 通道统计
-- 单 trial 波形查看
-- 类别平均波形
-- 类别平均频谱（PSD）
-- UI 中英文友好字体回退
+For one run bundle, the viewer uses:
 
-## 4. 导出
+- `session_meta.json`
+- `quality_report.json`
+- `board_map.json`
+- `board_data.npy`
+- `events.csv`
+- `trials.csv`
+- `segments.csv`
+- `mi_epochs.npz`
+- `gate_epochs.npz`
+- `artifact_epochs.npz`
+- `continuous.npz`
 
-支持导出：
+If one derivative file is missing, the viewer still loads the rest and marks
+the missing file in the Files tab.
 
-- JSON：`<stem>_viewer_stats.json`
-- CSV（类别统计）：`<stem>_class_stats.csv`
-- CSV（通道统计）：`<stem>_channel_stats.csv`
+## What 04 Shows
 
-## 5. 常见问题
+Overview:
 
-### 5.1 选择文件后提示缺少 X/y
+- subject / session / save index
+- duration, sample count, sampling rate
+- board matrix shape and EEG row mapping
+- trial / event / segment counts
+- MI / gate / artifact / continuous derivative shapes
 
-该文件不是主 epoch 结构（可能是 gate/artifact/continuous npz），请换 `*_mi_epochs.npz` 或 `*_epochs.npz`。
+Tables:
 
-### 5.2 图像单位看起来不对
+- class stats from `trials.csv`
+- segment summary from `segments.csv`
+- detailed trials table
+- detailed segments table
+- continuous prompt table
+- event log table
+- channel quality / signal stats
+- run file presence table
 
-viewer 会按 `signal_unit` 自动换算到 `uV` 显示；如果历史文件单位字段异常，统计值可能偏差，请以新版采集导出文件为准。
+Plots:
+
+- selected trial from continuous `board_data.npy`
+- selected segment from continuous `board_data.npy`
+- selected continuous prompt from continuous `board_data.npy`
+- selected MI epoch from `mi_epochs.npz`
+- MI class mean waveform
+- MI class PSD
+
+For continuous plots, the viewer can overlay:
+
+- semantic segments
+- atomic events
+
+This makes it suitable for checking whether saved labels line up with the
+continuous board signal.
+
+## Important Interpretation Rules
+
+- `mi_epochs.npz` still contains accepted imagery epochs only.
+- rejected trials are visible through `trials.csv` and `segments.csv`.
+- class stats are based on `trials.csv`, so missing / zero-count classes remain visible.
+- continuous plots read EEG rows directly from `board_data.npy`, which are stored in microvolts.
+- MI epoch plots read `mi_epochs.npz`; if the file stores `volt`, the viewer converts to `uV`.
+
+## Exported Files
+
+Exports are written next to the source run bundle:
+
+- `<run_stem>_viewer_summary.json`
+- `<run_stem>_viewer_class_stats.csv`
+- `<run_stem>_viewer_segment_summary.csv`
+- `<run_stem>_viewer_trials.csv`
+- `<run_stem>_viewer_segments.csv`
+- `<run_stem>_viewer_prompts.csv`
+- `<run_stem>_viewer_channels.csv`
+- `<run_stem>_viewer_files.csv`
+
+## Good Uses
+
+- verify trial labels against continuous saved data
+- inspect rejected trials
+- inspect segment boundaries and source events
+- inspect continuous prompts and execution success
+- inspect gate negative source composition
+- inspect artifact window coverage
+- inspect channel quality and board integrity after one run
+
+## Limits
+
+- it is still a post-save inspection tool, not a live monitor
+- it does not train or infer
+- it does not replace MNE/raw FIF debugging for very low-level analysis

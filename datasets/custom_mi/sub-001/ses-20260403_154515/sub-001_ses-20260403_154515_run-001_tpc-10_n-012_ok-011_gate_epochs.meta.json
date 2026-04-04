@@ -1,0 +1,35 @@
+{
+  "schema_version": 2,
+  "exporter_name": "mi_collection",
+  "created_at": "2026-04-03T15:54:46",
+  "source_run_stem": "sub-001_ses-20260403_154515_run-001_tpc-10_n-012_ok-011",
+  "source_save_index": 1,
+  "source_sha256": "106e3cba0517bf8f3a2fa209d63dbf1e4ceb2d142633b53dad6ce6fc1fabe30b",
+  "source_files": {
+    "board_data_npy": "sub-001/ses-20260403_154515/sub-001_ses-20260403_154515_run-001_tpc-10_n-012_ok-011_board_data.npy",
+    "events_csv": "sub-001/ses-20260403_154515/sub-001_ses-20260403_154515_run-001_tpc-10_n-012_ok-011_events.csv",
+    "trials_csv": "sub-001/ses-20260403_154515/sub-001_ses-20260403_154515_run-001_tpc-10_n-012_ok-011_trials.csv",
+    "segments_csv": "sub-001/ses-20260403_154515/sub-001_ses-20260403_154515_run-001_tpc-10_n-012_ok-011_segments.csv"
+  },
+  "subject_id": "001",
+  "session_id": "20260403_154515",
+  "derivation_name": "gate_epochs",
+  "derivation_policy": {
+    "positive_source": "accepted_imagery",
+    "negative_sources": [
+      "baseline",
+      "eyes_open_rest",
+      "iti"
+    ],
+    "hard_negative_sources": [
+      "artifact_blink",
+      "artifact_eye_movement",
+      "artifact_head_motion",
+      "artifact_jaw",
+      "artifact_swallow",
+      "rejected_trial"
+    ],
+    "window_sec": 4.0,
+    "step_sec": 0.5
+  }
+}

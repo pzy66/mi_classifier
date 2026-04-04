@@ -1,0 +1,6 @@
+﻿trial_id,save_index,mi_run_index,run_trial_index,class_name,display_name,accepted,cue_onset_sample,imagery_onset_sample,imagery_offset_sample,trial_end_sample,note
+1,1,1,1,left_hand,左手想象,1,533,809,1819,2351,
+2,1,1,2,right_hand,右手想象,1,2861,3159,4163,4688,
+3,1,1,3,feet,双脚想象,1,5211,5434,6468,7021,
+4,1,1,4,tongue,舌头想象,1,7531,7815,8758,9342,
+5,1,1,5,feet,双脚想象,0,9867,10150,10240,10241,当前会话手动提前结束

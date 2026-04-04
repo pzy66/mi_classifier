@@ -1,4 +1,4 @@
-"""PyCharm launcher for MI NPZ viewer (stats + waveform visualization)."""
+"""PyCharm launcher for the MI collection run-bundle viewer."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ def show_startup_error(title: str, message: str) -> None:
 
 
 def main() -> int:
-    """Launch epochs.npz visualization UI."""
+    """Launch the run-bundle visualization UI."""
     try:
         from mi_npz_viewer import main as viewer_main
     except ModuleNotFoundError as error:

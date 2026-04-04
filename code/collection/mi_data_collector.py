@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import base64
 from collections import deque
+from dataclasses import replace
 import secrets
+import subprocess
 import sys
 import threading
 import time
@@ -15,7 +18,7 @@ import numpy as np
 from brainflow.board_shim import BoardIds, BoardShim, BrainFlowInputParams
 from brainflow.data_filter import DataFilter, FilterTypes, NoiseTypes
 from PyQt5.QtCore import QObject, QPointF, QRect, QRectF, Qt, QThread, QTimer, pyqtSignal, pyqtSlot
-from PyQt5.QtGui import QBrush, QColor, QFont, QImage, QLinearGradient, QPainter, QPainterPath, QPen
+from PyQt5.QtGui import QBrush, QColor, QFont, QFontMetrics, QImage, QLinearGradient, QPainter, QPainterPath, QPen
 from PyQt5.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -69,10 +72,18 @@ from src.mi_collection import (
 
 
 DEFAULT_CHANNEL_NAMES = ["C3", "Cz", "C4", "PO3", "PO4", "O1", "Oz", "O2"]
+PROTOCOL_MODE_FULL = "full"
+PROTOCOL_MODE_MI_ONLY = "mi_only"
 IMAGERY_START_TONE_HZ = 1200
 IMAGERY_START_TONE_MS = 140
 IMAGERY_END_TONE_HZ = 800
 IMAGERY_END_TONE_MS = 180
+CUE_VOICE_PROMPTS = {
+    "left_hand": "想象左手",
+    "right_hand": "想象右手",
+    "feet": "想象双脚",
+    "tongue": "想象舌头",
+}
 PHASE_LABELS = {
     "idle": "等待开始",
     "baseline": "准备阶段",
@@ -166,7 +177,7 @@ DEFAULT_CONFIG = {
     "channel_positions": "0,1,2,3,4,5,6,7",
     "trials_per_class": 10,
     "baseline_sec": 2.0,
-    "cue_sec": 1.0,
+    "cue_sec": 2.0,
     "imagery_sec": 4.0,
     "iti_sec": 2.0,
     "run_count": 3,
@@ -175,7 +186,7 @@ DEFAULT_CONFIG = {
     "long_run_rest_every": 2,
     "long_run_rest_sec": 120.0,
     "quality_check_sec": 45.0,
-    "practice_sec": 180.0,
+    "practice_sec": 0.0,
     "calibration_open_sec": 60.0,
     "calibration_closed_sec": 60.0,
     "calibration_eye_sec": 30.0,
@@ -201,7 +212,6 @@ DEFAULT_CONFIG = {
     "recent_exercise": "unknown",
     "sleep_note": "",
     "random_seed": 0,
-    "save_epochs_npz": True,
     "use_separate_participant_screen": True,
     "notes": "",
 }
@@ -287,6 +297,18 @@ class CueIllustrationWidget(QWidget):
         return QColor(PHASE_ACCENT_COLORS.get(self.phase, "#64748B"))
 
     @staticmethod
+    def _wrapped_text_height(text: str, font: QFont, width: float) -> float:
+        if not str(text).strip():
+            return 0.0
+        metrics = QFontMetrics(font)
+        rect = metrics.boundingRect(
+            QRect(0, 0, max(1, int(width)), 2000),
+            int(Qt.AlignHCenter | Qt.AlignTop | Qt.TextWordWrap),
+            text,
+        )
+        return float(rect.height())
+
+    @staticmethod
     def _fit_rect(container: QRectF, image_width: float, image_height: float) -> QRectF:
         if image_width <= 0 or image_height <= 0:
             return QRectF(container)
@@ -358,20 +380,28 @@ class CueIllustrationWidget(QWidget):
         painter.setBrush(QColor(accent))
         painter.drawRoundedRect(QRectF(card.left() + 30, card.top() + 24, card.width() - 60, 12), 6, 6)
 
-        text_rect = QRectF(card.left() + 36, card.top() + 52, card.width() - 72, 110)
+        text_left = card.left() + 36
+        text_width = card.width() - 72
+        title_top = card.top() + 52
+        title_font = QFont("Microsoft YaHei", 24, QFont.Bold)
+        subtitle_font = QFont("Microsoft YaHei", 13)
+        title_height = max(44.0, self._wrapped_text_height(self.title, title_font, text_width) + 8.0)
+        title_rect = QRectF(text_left, title_top, text_width, title_height)
         painter.setPen(QColor("#0F172A"))
-        painter.setFont(QFont("Microsoft YaHei", 24, QFont.Bold))
-        painter.drawText(text_rect, Qt.AlignLeft | Qt.AlignTop, self.title)
+        painter.setFont(title_font)
+        painter.drawText(title_rect, Qt.AlignHCenter | Qt.AlignTop | Qt.TextWordWrap, self.title)
 
+        subtitle_top = title_rect.bottom() + 10.0
+        subtitle_height = self._wrapped_text_height(self.subtitle, subtitle_font, text_width)
+        subtitle_rect = QRectF(text_left, subtitle_top, text_width, max(0.0, subtitle_height + 4.0))
         painter.setPen(QColor("#475569"))
-        painter.setFont(QFont("Microsoft YaHei", 13))
-        painter.drawText(
-            QRectF(text_rect.left(), text_rect.bottom() - 4, text_rect.width(), 66),
-            Qt.AlignLeft | Qt.AlignTop,
-            self.subtitle,
-        )
+        painter.setFont(subtitle_font)
+        if subtitle_height > 0:
+            painter.drawText(subtitle_rect, Qt.AlignHCenter | Qt.AlignTop | Qt.TextWordWrap, self.subtitle)
 
-        drawing_rect = QRectF(card.left() + 60, card.top() + 180, card.width() - 120, card.height() - 230)
+        drawing_top = max(card.top() + 188.0, subtitle_rect.bottom() + 24.0 if subtitle_height > 0 else title_rect.bottom() + 24.0)
+        drawing_bottom = card.bottom() - 36.0
+        drawing_rect = QRectF(card.left() + 60, drawing_top, card.width() - 120, max(120.0, drawing_bottom - drawing_top))
         if self.phase in {"idle", "baseline", "iti", "paused"} or self.class_name is None:
             self._draw_fixation(painter, drawing_rect, accent)
             return
@@ -700,7 +730,7 @@ class RealtimeEEGPreviewWidget(QWidget):
         else:
             self.set_impedance_channel(int(self.impedance_channel))
         if self.mode == self.MODE_IMPEDANCE:
-            self._update_impedance_value()
+            self._update_impedance_values()
         self._dirty = True
         self.update()
 
@@ -725,7 +755,7 @@ class RealtimeEEGPreviewWidget(QWidget):
             buffer.extend(np.asarray(chunk[channel_index], dtype=np.float32).tolist())
 
         if self.mode == self.MODE_IMPEDANCE:
-            self._update_impedance_value()
+            self._update_impedance_values()
 
         self.last_chunk_perf = time.perf_counter()
         self._dirty = True
@@ -748,14 +778,24 @@ class RealtimeEEGPreviewWidget(QWidget):
             return None
         return max(z_ohm, 0.0)
 
-    def _update_impedance_value(self) -> None:
-        active_index = int(self.impedance_channel) - 1
-        if active_index < 0 or active_index >= len(self.buffers):
+    @staticmethod
+    def _format_impedance_value(z_ohm: float | None) -> str:
+        if z_ohm is None or not np.isfinite(float(z_ohm)):
+            return "Imp --"
+        value = float(max(0.0, z_ohm))
+        if value >= 1_000_000.0:
+            return f"Imp {value / 1_000_000.0:.2f}M"
+        if value >= 1_000.0:
+            return f"Imp {value / 1_000.0:.1f}k"
+        return f"Imp {value:.0f}"
+
+    def _update_impedance_values(self) -> None:
+        if not self.buffers or not self.last_impedance_ohms:
             return
-        if active_index >= len(self.last_impedance_ohms):
-            return
-        y_raw = np.asarray(self.buffers[active_index], dtype=np.float64)
-        self.last_impedance_ohms[active_index] = self._estimate_impedance_ohms_from_raw_window(y_raw)
+        channel_count = min(len(self.buffers), len(self.last_impedance_ohms))
+        for channel_index in range(channel_count):
+            y_raw = np.asarray(self.buffers[channel_index], dtype=np.float64)
+            self.last_impedance_ohms[channel_index] = self._estimate_impedance_ohms_from_raw_window(y_raw)
 
     def _build_plot_signal(self, y_raw: np.ndarray) -> np.ndarray:
         y = np.asarray(y_raw, dtype=np.float64)
@@ -775,90 +815,141 @@ class RealtimeEEGPreviewWidget(QWidget):
         painter.setFont(placeholder_font)
         painter.drawText(rect, Qt.AlignCenter | Qt.TextWordWrap, self.placeholder_text)
 
+    def _layout_metrics(self, *, channel_count_hint: int | None = None) -> dict[str, object]:
+        channel_count = max(1, int(channel_count_hint or len(self.channel_names) or 1))
+        outer_margin = 10.0 if self.width() < 760 else 12.0
+        inner_margin_x = 12.0 if self.width() < 760 else 14.0
+        outer_rect = QRectF(self.rect()).adjusted(outer_margin, outer_margin, -outer_margin, -outer_margin)
+        has_stream = bool(self.channel_names) and self.sampling_rate > 0.0
+        header_narrow = outer_rect.width() < 590.0
+        header_height = 24.0 if has_stream else 32.0
+        header_rect = QRectF(
+            outer_rect.left() + inner_margin_x,
+            outer_rect.top() + 8.0,
+            max(120.0, outer_rect.width() - inner_margin_x * 2.0),
+            header_height,
+        )
+        content_top = header_rect.bottom() + (10.0 if has_stream else 8.0)
+        content_rect = QRectF(
+            outer_rect.left() + inner_margin_x,
+            content_top,
+            max(120.0, outer_rect.width() - inner_margin_x * 2.0),
+            max(24.0, outer_rect.bottom() - content_top - 10.0),
+        )
+
+        if content_rect.height() >= 860.0:
+            row_gap = 12.0 if channel_count <= 4 else 10.0 if channel_count <= 8 else 8.0
+        elif content_rect.height() >= 680.0:
+            row_gap = 10.0 if channel_count <= 4 else 8.0 if channel_count <= 8 else 6.0
+        elif content_rect.height() >= 520.0:
+            row_gap = 8.0 if channel_count <= 4 else 6.0 if channel_count <= 8 else 5.0
+        else:
+            row_gap = 6.0 if channel_count <= 4 else 5.0 if channel_count <= 6 else 4.0
+
+        available_row_height = (content_rect.height() - row_gap * max(0, channel_count - 1)) / float(channel_count)
+        if available_row_height < 24.0 and channel_count > 1:
+            row_gap = 3.0 if content_rect.height() >= channel_count * 24.0 else 2.0
+            available_row_height = (content_rect.height() - row_gap * (channel_count - 1)) / float(channel_count)
+
+        if channel_count <= 2:
+            target_row_height = 168.0
+        elif channel_count <= 4:
+            target_row_height = 132.0
+        elif channel_count <= 8:
+            target_row_height = 104.0
+        elif channel_count <= 12:
+            target_row_height = 82.0
+        elif channel_count <= 16:
+            target_row_height = 68.0
+        else:
+            target_row_height = 54.0
+        row_height = max(22.0, min(target_row_height, available_row_height))
+
+        label_width = 76.0 if content_rect.width() >= 920.0 else 70.0 if content_rect.width() >= 760.0 else 60.0 if content_rect.width() >= 640.0 else 54.0
+        if channel_count >= 8:
+            label_width = max(54.0, label_width - 2.0)
+
+        right_info_width = 116.0 if self.mode == self.MODE_IMPEDANCE else 102.0
+        if content_rect.width() >= 920.0:
+            right_info_width += 12.0
+        elif content_rect.width() >= 780.0:
+            right_info_width += 6.0
+        elif content_rect.width() < 640.0:
+            right_info_width -= 8.0
+
+        return {
+            "outer_rect": outer_rect,
+            "header_rect": header_rect,
+            "content_rect": content_rect,
+            "header_narrow": header_narrow,
+            "row_gap": row_gap,
+            "row_height": row_height,
+            "label_width": label_width,
+            "right_info_width": max(76.0, right_info_width),
+            "plot_padding_y": 3.0 if row_height < 34.0 else 5.0 if row_height < 84.0 else 7.0,
+        }
+
     def paintEvent(self, event) -> None:  # noqa: N802
         del event
         if self.mode == self.MODE_IMPEDANCE:
-            self._update_impedance_value()
+            self._update_impedance_values()
 
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
         painter.fillRect(self.rect(), QColor("#08111F"))
 
-        outer_rect = QRectF(self.rect()).adjusted(12, 12, -12, -12)
+        metrics = self._layout_metrics()
+        outer_rect = metrics["outer_rect"]
+        header_rect = metrics["header_rect"]
+        content_rect = metrics["content_rect"]
+        header_narrow = bool(metrics["header_narrow"])
+        row_gap = float(metrics["row_gap"])
+        row_height = float(metrics["row_height"])
+        label_width = float(metrics["label_width"])
+        right_info_width = float(metrics["right_info_width"])
+        plot_padding_y = float(metrics["plot_padding_y"])
         painter.setPen(QPen(QColor("#22314A"), 1.0))
         painter.setBrush(QColor("#0B1727"))
         painter.drawRoundedRect(outer_rect, 14, 14)
 
-        header_rect = QRectF(outer_rect.left() + 14, outer_rect.top() + 10, outer_rect.width() - 28, 44)
-        header_narrow = header_rect.width() < 640.0
-        title_rect = QRectF(header_rect.left(), header_rect.top(), header_rect.width(), 20)
-        meta_rect = QRectF(header_rect.left(), header_rect.top() + 22, header_rect.width(), 18 if not header_narrow else 34)
+        meta_rect = QRectF(header_rect.left(), header_rect.top(), header_rect.width(), header_rect.height())
 
         if self.channel_names and self.sampling_rate > 0:
             freshness_sec = 0.0 if self.last_chunk_perf <= 0 else max(0.0, time.perf_counter() - self.last_chunk_perf)
-            if self.mode == self.MODE_EEG:
-                title_text = "EEG 模式 | FBCCA 风格仅显示预处理"
-                meta_text = (
-                    f"保存保持原始 | {len(self.channel_names)} 通道 | "
-                    f"{self.sampling_rate:g} Hz | 窗口 {self.window_seconds:.1f}s"
-                )
-            else:
-                title_text = f"阻抗模式 | CH{self.impedance_channel} | 原始显示"
-                meta_text = f"{len(self.channel_names)} 通道 | {self.sampling_rate:g} Hz | 窗口 {self.window_seconds:.1f}s"
-
-            painter.setPen(QColor("#E2E8F0"))
-            painter.setFont(QFont("Microsoft YaHei", max(10, min(14, int(self.height() * 0.02))), QFont.Bold))
-            painter.drawText(title_rect, Qt.AlignLeft | Qt.AlignVCenter | Qt.TextWordWrap, title_text)
-
-            painter.setPen(QColor("#94A3B8"))
-            painter.setFont(QFont("Consolas", max(9, min(12, int(self.height() * 0.017)))))
-            if header_narrow:
-                painter.drawText(
-                    meta_rect,
-                    Qt.AlignLeft | Qt.AlignTop | Qt.TextWordWrap,
-                    f"{meta_text} | 最近更新 {freshness_sec:.2f}s",
-                )
-            else:
-                meta_left_rect = QRectF(meta_rect.left(), meta_rect.top(), max(120.0, meta_rect.width() - 132.0), meta_rect.height())
-                meta_right_rect = QRectF(meta_rect.right() - 128.0, meta_rect.top(), 128.0, meta_rect.height())
-                painter.drawText(meta_left_rect, Qt.AlignLeft | Qt.AlignVCenter | Qt.TextWordWrap, meta_text)
-                painter.setPen(QColor("#F59E0B" if freshness_sec > 1.0 else "#94A3B8"))
-                painter.drawText(meta_right_rect, Qt.AlignRight | Qt.AlignVCenter, f"最近更新 {freshness_sec:.2f}s")
+            freshness_font = QFont("Consolas", max(9, min(12, int(self.height() * 0.017))))
+            freshness_rect = QRectF(meta_rect.right() - 126.0, meta_rect.top(), 126.0, meta_rect.height())
+            painter.setPen(QColor("#F59E0B" if freshness_sec > 1.0 else "#94A3B8"))
+            painter.setFont(freshness_font)
+            painter.drawText(freshness_rect, Qt.AlignRight | Qt.AlignVCenter, f"更新 {freshness_sec:.2f}s")
         else:
             painter.setPen(QColor("#E2E8F0"))
             painter.setFont(QFont("Microsoft YaHei", max(10, min(14, int(self.height() * 0.02))), QFont.Bold))
             painter.drawText(header_rect, Qt.AlignLeft | Qt.AlignVCenter, "EEG / 阻抗预览")
 
-        content_top = outer_rect.top() + (80 if header_narrow else 66)
-        content_rect = QRectF(outer_rect.left() + 14, content_top, outer_rect.width() - 28, outer_rect.bottom() - content_top - 14)
         if not self.channel_names or not self.buffers:
             self._draw_placeholder(painter, content_rect)
             return
 
         channel_count = len(self.channel_names)
-        row_gap = 8.0
-        row_height = max(34.0, (content_rect.height() - row_gap * (channel_count - 1)) / max(1, channel_count))
-        label_width = 64.0
-        right_info_width = min(140.0, max(96.0, content_rect.width() * 0.22))
 
         for channel_index, channel_name in enumerate(self.channel_names):
             row_top = content_rect.top() + channel_index * (row_height + row_gap)
             row_rect = QRectF(content_rect.left(), row_top, content_rect.width(), row_height)
             plot_rect = QRectF(
                 row_rect.left() + label_width,
-                row_rect.top() + 4,
+                row_rect.top() + plot_padding_y,
                 max(10.0, row_rect.width() - label_width - right_info_width),
-                max(16.0, row_rect.height() - 8),
+                max(16.0, row_rect.height() - plot_padding_y * 2.0),
             )
 
-            active_impedance_channel = self.mode == self.MODE_IMPEDANCE and (channel_index + 1 == self.impedance_channel)
-            row_fill = QColor("#0E1B2D" if not active_impedance_channel else "#1F2937")
+            impedance_mode = self.mode == self.MODE_IMPEDANCE
+            row_fill = QColor("#1F2937" if impedance_mode else "#0E1B2D")
             painter.setPen(Qt.NoPen)
             painter.setBrush(row_fill)
             painter.drawRoundedRect(row_rect, 10, 10)
 
-            painter.setPen(QColor("#E2E8F0" if active_impedance_channel else "#94A3B8"))
-            channel_font_size = max(10, min(13, int(row_height * 0.36)))
+            painter.setPen(QColor("#E2E8F0" if impedance_mode else "#94A3B8"))
+            channel_font_size = max(9, min(12, int(row_height * 0.34)))
             painter.setFont(QFont("Consolas", channel_font_size, QFont.Bold))
             painter.drawText(
                 QRectF(row_rect.left() + 8, row_rect.top(), label_width - 10, row_rect.height()),
@@ -918,12 +1009,10 @@ class RealtimeEEGPreviewWidget(QWidget):
                     waveform.lineTo(x, y_pos)
 
             color = QColor(self.CHANNEL_COLORS[channel_index % len(self.CHANNEL_COLORS)])
-            if self.mode == self.MODE_IMPEDANCE and not active_impedance_channel:
-                color.setAlpha(95)
             painter.setPen(
                 QPen(
                     color,
-                    1.6 if active_impedance_channel else 1.2,
+                    1.5 if impedance_mode else 1.2,
                     Qt.SolidLine,
                     Qt.RoundCap,
                     Qt.RoundJoin,
@@ -933,23 +1022,21 @@ class RealtimeEEGPreviewWidget(QWidget):
 
             info_text = ""
             info_color = QColor("#64748B")
-            if self.mode == self.MODE_IMPEDANCE:
-                if active_impedance_channel:
-                    z_ohm = None
-                    if channel_index < len(self.last_impedance_ohms):
-                        z_ohm = self.last_impedance_ohms[channel_index]
-                    if z_ohm is None:
-                        info_text = "Imp: --"
-                    else:
-                        info_text = f"Imp ~ {z_ohm / 1000.0:.1f} kOhm"
-                    info_color = QColor("#FDE68A")
+            if impedance_mode:
+                z_ohm = None
+                if channel_index < len(self.last_impedance_ohms):
+                    z_ohm = self.last_impedance_ohms[channel_index]
+                if z_ohm is None:
+                    info_text = "Imp --"
+                    info_color = QColor("#94A3B8")
                 else:
-                    info_text = "Imp: --"
+                    info_text = self._format_impedance_value(z_ohm)
+                    info_color = QColor("#FDE68A")
             else:
-                info_text = f"{np.ptp(y_raw):.0f} uV"
+                info_text = f"P2P {np.ptp(y_raw):.0f}uV"
 
             painter.setPen(info_color)
-            info_font_size = max(9, min(12, int(row_height * 0.33)))
+            info_font_size = max(8, min(11, int(row_height * 0.31)))
             painter.setFont(QFont("Consolas", info_font_size))
             painter.drawText(
                 QRectF(plot_rect.right() + 6, row_rect.top(), right_info_width - 6, row_rect.height()),
@@ -969,6 +1056,7 @@ class BoardCaptureWorker(QObject):
     status_changed = pyqtSignal(str)
     error_occurred = pyqtSignal(str)
     session_data_ready = pyqtSignal(object)
+    quality_mode_switch_finished = pyqtSignal(object)
     finished = pyqtSignal()
 
     def __init__(
@@ -992,9 +1080,13 @@ class BoardCaptureWorker(QObject):
         self.selected_rows: list[int] = []
         self.marker_row: int | None = None
         self.timestamp_row: int | None = None
+        self.package_num_row: int | None = None
+        self.board_descr: dict[str, object] = {}
         self.sampling_rate: float | None = None
         self.current_quality_mode = self.MODE_EEG
         self._hw_impedance_channel: int | None = None
+        self.quality_mode_request_lock = threading.Lock()
+        self._pending_quality_mode_request: dict[str, object] | None = None
 
     @staticmethod
     def build_impedance_command(channel: int, test_p: bool = True, test_n: bool = False) -> str:
@@ -1121,67 +1213,66 @@ class BoardCaptureWorker(QObject):
     ) -> tuple[bool, str]:
         mode = str(target_mode).strip().upper()
         if mode not in {self.MODE_EEG, self.MODE_IMPEDANCE}:
-            return False, f"Unsupported preview mode: {target_mode!r}"
+            return False, f"不支持的质量检查模式：{target_mode!r}"
         if mode == self.MODE_IMPEDANCE and not self.supports_impedance_mode():
-            return False, "Impedance mode is available only for Cyton/Cyton Daisy boards."
+            return False, "当前阻抗模式仅支持 Cyton / Cyton Daisy 板卡。"
 
         with self.board_lock:
             if self.board is None:
-                return False, "Device is not connected."
+                return False, "设备尚未连接。"
 
             board = self.board
             channel_count = self._selected_channel_count()
-            channel = int(np.clip(int(target_channel), 1, channel_count))
-            fast_switched = False
 
             try:
-                if (
-                    mode == self.MODE_IMPEDANCE
-                    and self.current_quality_mode == self.MODE_IMPEDANCE
-                    and self._fast_switch_impedance_channel(board, channel)
-                ):
-                    fast_switched = True
-                else:
-                    self._safe_stop_stream(board)
-                    time.sleep(0.05)
+                if mode == self.current_quality_mode and not bool(reset_default):
+                    return True, ""
 
-                    if self.supports_impedance_mode():
+                self._safe_stop_stream(board)
+                time.sleep(0.05)
+
+                if self.supports_impedance_mode():
+                    for ch in range(1, channel_count + 1):
+                        self._config_board_with_retry(
+                            board,
+                            self.build_impedance_command(ch, False, False),
+                        )
+                    if bool(reset_default) or mode == self.MODE_EEG:
+                        self._config_board_with_retry(board, "d")
+                    if mode == self.MODE_IMPEDANCE:
                         for ch in range(1, channel_count + 1):
                             self._config_board_with_retry(
                                 board,
-                                self.build_impedance_command(ch, False, False),
+                                self.build_impedance_command(ch, True, False),
                             )
-                        if bool(reset_default) or mode == self.MODE_EEG:
-                            self._config_board_with_retry(board, "d")
-                        if mode == self.MODE_IMPEDANCE:
-                            self._config_board_with_retry(
-                                board,
-                                self.build_impedance_command(channel, True, False),
-                            )
-                            self._hw_impedance_channel = int(channel)
-                        else:
-                            self._hw_impedance_channel = None
+                    self._hw_impedance_channel = None
 
-                    self._start_stream_with_retry(board, buffer_size=450000)
+                self._start_stream_with_retry(board, buffer_size=450000)
             except Exception as error:
-                if not fast_switched:
-                    try:
-                        self._start_stream_with_retry(board, buffer_size=450000, retries=1)
-                    except Exception:
-                        pass
-                return False, f"Failed to switch quality-check mode: {error}"
+                try:
+                    self._start_stream_with_retry(board, buffer_size=450000, retries=1)
+                except Exception:
+                    pass
+                return False, f"切换质量检查模式失败：{error}"
 
             self.current_quality_mode = mode
 
         if mode == self.MODE_IMPEDANCE:
-            self.status_changed.emit(
-                f"Quality-check mode -> IMPEDANCE (CH{channel}{', fast' if fast_switched else ''})"
-            )
+            self.status_changed.emit("质量检查模式 -> 8通道阻抗")
         elif bool(reset_default):
-            self.status_changed.emit("Quality-check mode -> EEG (reset defaults)")
+            self.status_changed.emit("质量检查模式 -> EEG（恢复默认设置）")
         else:
-            self.status_changed.emit("Quality-check mode -> EEG")
+            self.status_changed.emit("质量检查模式 -> EEG")
         return True, ""
+
+    @pyqtSlot(str, int, bool)
+    def request_quality_mode_switch(self, target_mode: str, target_channel: int, reset_default: bool) -> None:
+        with self.quality_mode_request_lock:
+            self._pending_quality_mode_request = {
+                "target_mode": str(target_mode),
+                "target_channel": int(target_channel),
+                "reset_default": bool(reset_default),
+            }
 
     @pyqtSlot()
     def run(self) -> None:
@@ -1214,6 +1305,15 @@ class BoardCaptureWorker(QObject):
             self.selected_rows = [int(eeg_rows[index]) for index in self.channel_positions]
             self.marker_row = int(BoardShim.get_marker_channel(self.board_id))
             self.timestamp_row = int(BoardShim.get_timestamp_channel(self.board_id))
+            try:
+                self.package_num_row = int(BoardShim.get_package_num_channel(self.board_id))
+            except Exception:
+                self.package_num_row = None
+            try:
+                board_descr = BoardShim.get_board_descr(self.board_id)
+                self.board_descr = dict(board_descr) if isinstance(board_descr, dict) else {}
+            except Exception:
+                self.board_descr = {}
             self.sampling_rate = float(BoardShim.get_sampling_rate(self.board_id))
 
             self.connection_ready.emit(
@@ -1222,6 +1322,8 @@ class BoardCaptureWorker(QObject):
                     "selected_rows": self.selected_rows,
                     "marker_row": self.marker_row,
                     "timestamp_row": self.timestamp_row,
+                    "package_num_row": self.package_num_row,
+                    "board_descr": dict(self.board_descr),
                     "channel_names": self.channel_names,
                 }
             )
@@ -1232,6 +1334,27 @@ class BoardCaptureWorker(QObject):
             while not self.stop_event.wait(self.poll_interval_sec):
                 if self.board is None:
                     break
+                pending_quality_mode_request = None
+                with self.quality_mode_request_lock:
+                    if self._pending_quality_mode_request is not None:
+                        pending_quality_mode_request = dict(self._pending_quality_mode_request)
+                        self._pending_quality_mode_request = None
+                if pending_quality_mode_request is not None:
+                    ok, message = self.switch_quality_mode_sync(
+                        target_mode=str(pending_quality_mode_request["target_mode"]),
+                        target_channel=int(pending_quality_mode_request["target_channel"]),
+                        reset_default=bool(pending_quality_mode_request["reset_default"]),
+                    )
+                    self.quality_mode_switch_finished.emit(
+                        {
+                            "ok": bool(ok),
+                            "message": str(message),
+                            "target_mode": str(pending_quality_mode_request["target_mode"]),
+                            "target_channel": int(pending_quality_mode_request["target_channel"]),
+                            "reset_default": bool(pending_quality_mode_request["reset_default"]),
+                        }
+                    )
+                    continue
                 try:
                     with self.board_lock:
                         chunk = None if self.board is None else self.board.get_board_data()
@@ -1274,6 +1397,8 @@ class BoardCaptureWorker(QObject):
                         "selected_rows": list(self.selected_rows),
                         "marker_row": self.marker_row,
                         "timestamp_row": self.timestamp_row,
+                        "package_num_row": self.package_num_row,
+                        "board_descr": dict(self.board_descr),
                     }
 
                 with self.board_lock:
@@ -1318,11 +1443,60 @@ class BoardCaptureWorker(QObject):
         self.stop_event.set()
 
 
+class SessionSaveWorker(QObject):
+    """Background save worker so disk export does not block the UI thread."""
+
+    save_completed = pyqtSignal(dict)
+    save_failed = pyqtSignal(str)
+    finished = pyqtSignal()
+
+    def __init__(
+        self,
+        *,
+        payload: dict[str, object],
+        settings: SessionSettings,
+        event_log: list[dict[str, object]],
+        trial_records: list[TrialRecord],
+    ) -> None:
+        super().__init__()
+        self.payload = dict(payload)
+        self.settings = settings
+        self.event_log = list(event_log)
+        self.trial_records = list(trial_records)
+
+    @pyqtSlot()
+    def run(self) -> None:
+        try:
+            result = save_mi_session(
+                brainflow_data=np.asarray(self.payload["brainflow_data"], dtype=np.float32),
+                sampling_rate=float(self.payload["sampling_rate"]),
+                eeg_rows=list(self.payload["selected_rows"]),
+                marker_row=int(self.payload["marker_row"]),
+                timestamp_row=(
+                    None if self.payload["timestamp_row"] is None else int(self.payload["timestamp_row"])
+                ),
+                package_num_row=(
+                    None if self.payload.get("package_num_row") is None else int(self.payload["package_num_row"])
+                ),
+                board_descr=dict(self.payload.get("board_descr") or {}),
+                settings=self.settings,
+                event_log=self.event_log,
+                trial_records=self.trial_records,
+            )
+        except Exception as error:
+            self.save_failed.emit(f"保存会话失败：{error}")
+        else:
+            self.save_completed.emit(result)
+        finally:
+            self.finished.emit()
+
+
 class MIDataCollectorWindow(QMainWindow):
     """主采集窗口，负责流程控制与状态展示。"""
 
     marker_requested = pyqtSignal(float)
     worker_stop_requested = pyqtSignal()
+    preview_mode_switch_requested = pyqtSignal(str, int, bool)
 
     def __init__(self, initial_config: dict | None = None) -> None:
         super().__init__()
@@ -1332,6 +1506,8 @@ class MIDataCollectorWindow(QMainWindow):
 
         self.worker_thread: QThread | None = None
         self.worker: BoardCaptureWorker | None = None
+        self.save_thread: QThread | None = None
+        self.save_worker: SessionSaveWorker | None = None
         self.device_info: dict | None = None
         self.capture_on_stop = False
         self.session_running = False
@@ -1370,13 +1546,21 @@ class MIDataCollectorWindow(QMainWindow):
         self.marker_failure_active = False
         self.marker_failure_message = ""
         self.config_panel_widget: QWidget | None = None
+        self.config_panel_layout: QVBoxLayout | None = None
+        self.config_bottom_panel: QWidget | None = None
+        self.config_section_label: QLabel | None = None
         self.config_section_combo: QComboBox | None = None
         self.config_stack: QStackedWidget | None = None
         self.config_groups: list[QWidget] = []
+        self.config_forms: list[QFormLayout] = []
         self.config_grid_columns = 0
+        self.control_group: QGroupBox | None = None
+        self.control_layout: QGridLayout | None = None
+        self.control_layout_columns = 0
         self.main_splitter: QSplitter | None = None
         self.session_tabs: QTabWidget | None = None
         self.operator_preview_panel: QWidget | None = None
+        self.preview_group: QGroupBox | None = None
         self.hero_title_label: QLabel | None = None
         self.hero_subtitle_label: QLabel | None = None
         self.root_layout: QVBoxLayout | None = None
@@ -1384,6 +1568,8 @@ class MIDataCollectorWindow(QMainWindow):
         self.preview_widget: RealtimeEEGPreviewWidget | None = None
         self.preview_status_label: QLabel | None = None
         self.preview_mode_label: QLabel | None = None
+        self.preview_layout: QVBoxLayout | None = None
+        self.preview_control_layout: QGridLayout | None = None
         self.preview_to_eeg_button: QPushButton | None = None
         self.preview_to_imp_button: QPushButton | None = None
         self.preview_prev_ch_button: QPushButton | None = None
@@ -1391,12 +1577,20 @@ class MIDataCollectorWindow(QMainWindow):
         self.preview_reset_button: QPushButton | None = None
         self.preview_mode = RealtimeEEGPreviewWidget.MODE_EEG
         self.preview_impedance_channel = 1
+        self.preview_mode_switch_pending = False
+        self.preview_mode_switch_target: dict[str, object] | None = None
+        self.pending_session_start_context: tuple[SessionSettings, list[list[str]]] | None = None
+        self.voice_prompt_lock = threading.Lock()
+        self.voice_prompt_process: subprocess.Popen | None = None
         self.log_group: QGroupBox | None = None
         self.log_text: QTextEdit | None = None
         self.protocol_text_label: QLabel | None = None
         self.config_tip_label: QLabel | None = None
         self.session_panel_layout: QVBoxLayout | None = None
         self._typography_signature: tuple[tuple[str, int], ...] | None = None
+        self._control_button_signature: tuple[object, ...] | None = None
+        self._responsive_chrome_signature: tuple[int, int, str] | None = None
+        self._preview_focus_layout_active = False
 
         self.phase_timer = QTimer(self)
         self.phase_timer.setInterval(100)
@@ -1411,6 +1605,22 @@ class MIDataCollectorWindow(QMainWindow):
         self.apply_default_values()
         self.refresh_board_input_state()
         self._apply_phase_theme("idle", None)
+
+    def _current_ui_mode(self) -> str:
+        if self.session_running or self.waiting_for_save:
+            return "session"
+        if self.device_info is not None:
+            return "preview"
+        return "startup"
+
+    def _set_splitter_sizes_if_needed(self, first: int, second: int) -> None:
+        if self.main_splitter is None:
+            return
+        target_sizes = [max(0, int(first)), max(0, int(second))]
+        current_sizes = self.main_splitter.sizes()
+        if len(current_sizes) == 2 and all(abs(int(current) - int(target)) <= 12 for current, target in zip(current_sizes, target_sizes)):
+            return
+        self.main_splitter.setSizes(target_sizes)
 
     def _desired_config_columns(self) -> int:
         if self.config_panel_widget is None:
@@ -1429,9 +1639,159 @@ class MIDataCollectorWindow(QMainWindow):
         return columns
 
     def _refresh_config_group_layout(self, force: bool = False) -> None:
-        del force
         if self.session_tabs is not None:
             self.session_tabs.setDocumentMode(self.width() < 1500 or self.height() < 880)
+        if self.control_layout is None:
+            return
+        if self.config_panel_widget is None:
+            return
+
+        preview_only_mode = self._current_ui_mode() == "preview"
+        if self.config_panel_layout is not None:
+            self.config_panel_layout.setStretch(0, 0)
+            self.config_panel_layout.setStretch(1, 0 if preview_only_mode else 1)
+            self.config_panel_layout.setStretch(2, 1 if preview_only_mode else 0)
+        if self.config_bottom_panel is not None:
+            self.config_bottom_panel.setSizePolicy(
+                QSizePolicy.Preferred,
+                QSizePolicy.Expanding if preview_only_mode else QSizePolicy.Maximum,
+            )
+        if self.control_group is not None:
+            self.control_group.setSizePolicy(
+                QSizePolicy.Preferred,
+                QSizePolicy.Expanding if preview_only_mode else QSizePolicy.Maximum,
+            )
+        config_width = self.config_panel_widget.width()
+        wrap_all_rows = config_width < 360
+        if self.config_section_label is not None:
+            if preview_only_mode or config_width < 380:
+                self.config_section_label.setVisible(False)
+            else:
+                section_label_text = "分区" if config_width < 460 else "配置分区"
+                self.config_section_label.setVisible(True)
+                self.config_section_label.setText(section_label_text)
+                self.config_section_label.setMinimumWidth(
+                    self.config_section_label.fontMetrics().horizontalAdvance(section_label_text) + 8
+                )
+        if self.config_section_combo is not None:
+            self.config_section_combo.setMinimumWidth(0)
+            self.config_section_combo.setVisible(not preview_only_mode)
+        if self.config_stack is not None:
+            self.config_stack.setVisible(not preview_only_mode)
+        for form in self.config_forms:
+            form.setRowWrapPolicy(QFormLayout.WrapAllRows if wrap_all_rows else QFormLayout.WrapLongRows)
+            form.setHorizontalSpacing(5 if wrap_all_rows else 6)
+            form.setVerticalSpacing(4 if wrap_all_rows else 6)
+            for row in range(form.rowCount()):
+                label_item = form.itemAt(row, QFormLayout.LabelRole)
+                label = label_item.widget() if label_item is not None else None
+                if isinstance(label, QLabel):
+                    label.setWordWrap(True)
+                    label.setAlignment(Qt.AlignLeft | (Qt.AlignTop if wrap_all_rows else Qt.AlignVCenter))
+                    label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+        active_buttons = self._visible_control_buttons_in_display_order()
+        if preview_only_mode:
+            desired_columns = self._preview_control_layout_columns(config_width, len(active_buttons))
+        elif config_width < 300:
+            desired_columns = 1
+        elif config_width < 420:
+            desired_columns = 2
+        else:
+            desired_columns = 3
+        desired_columns = max(1, min(desired_columns, len(active_buttons) if active_buttons else 1))
+        if not force and desired_columns == self.control_layout_columns and not preview_only_mode:
+            return
+        self.control_layout_columns = desired_columns
+        while self.control_layout.count():
+            item = self.control_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.hide()
+        if preview_only_mode:
+            row_count = max(1, int(np.ceil(len(active_buttons) / float(max(1, desired_columns)))))
+            spacing = 12 if desired_columns == 2 else 10
+            available_height = max(240, int(self.config_panel_widget.height()) - 48)
+            raw_row_height = int((available_height - spacing * max(0, row_count - 1) - 28) / float(row_count))
+            row_height = int(np.clip(raw_row_height, 64, 104))
+            button_heights = {1: row_height, 2: row_height, 3: row_height}
+            button_max_heights = {1: 16777215, 2: 16777215, 3: 16777215}
+            row_min_heights = {1: row_height, 2: row_height, 3: row_height}
+        else:
+            compact_controls = self.height() < 780 or self.session_running or self._preview_focus_active()
+            if compact_controls:
+                spacing = 6 if desired_columns <= 2 else 5
+                button_heights = {1: 34, 2: 32, 3: 30}
+                button_max_heights = {1: 40, 2: 38, 3: 36}
+                row_min_heights = {1: 38, 2: 34, 3: 32}
+            else:
+                spacing = 8 if desired_columns == 2 else 10
+                button_heights = {1: 38, 2: 36, 3: 34}
+                button_max_heights = {1: 46, 2: 46, 3: 40}
+                row_min_heights = {1: 44, 2: 44, 3: 38}
+            raw_row_height = button_heights[desired_columns]
+        self._refresh_control_button_chrome(
+            preview_only_mode=preview_only_mode,
+            desired_columns=desired_columns,
+            spacing=spacing,
+            estimated_row_height=max(raw_row_height, button_heights[desired_columns]),
+        )
+        self.control_layout.setHorizontalSpacing(spacing)
+        self.control_layout.setVerticalSpacing(spacing)
+        for column in range(3):
+            self.control_layout.setColumnStretch(column, 0)
+        for row in range(4):
+            self.control_layout.setRowStretch(row, 0)
+            self.control_layout.setRowMinimumHeight(row, 0)
+        for column in range(desired_columns):
+            self.control_layout.setColumnStretch(column, 1)
+        if preview_only_mode:
+            for row in range(max(1, int(np.ceil(len(active_buttons) / float(max(1, desired_columns)))))):
+                self.control_layout.setRowStretch(row, 1)
+
+        for index, button in enumerate(active_buttons):
+            row = index // desired_columns
+            column = index % desired_columns
+            button.show()
+            button.setMinimumHeight(button_heights[desired_columns])
+            button.setMaximumHeight(button_max_heights[desired_columns])
+            button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding if preview_only_mode else QSizePolicy.Fixed)
+            button.setMinimumWidth(0)
+            self.control_layout.addWidget(button, row, column)
+            self.control_layout.setRowMinimumHeight(row, row_min_heights[desired_columns])
+
+    @staticmethod
+    def _preview_control_layout_columns(config_width: int, visible_button_count: int) -> int:
+        return 1
+
+    def _control_buttons_in_display_order(self) -> list[QPushButton]:
+        buttons = [
+            self.connect_button,
+            self.start_button,
+            self.start_mi_only_button,
+            self.disconnect_button,
+        ]
+        return [button for button in buttons if button is not None]
+
+    def _visible_control_buttons_in_display_order(self) -> list[QPushButton]:
+        return [button for button in self._control_buttons_in_display_order() if not button.isHidden()]
+
+    def _apply_control_button_visibility(self) -> None:
+        connected = self.device_info is not None
+        if not connected:
+            visible_names = {"btnConnect"}
+        elif not self.session_running and not self.waiting_for_save:
+            visible_names = {"btnStart", "btnStartMiOnly", "btnDisconnect"}
+        else:
+            visible_names = set()
+
+        changed = False
+        for button in self._control_buttons_in_display_order():
+            should_show = button.objectName() in visible_names
+            if button.isHidden() == should_show:
+                button.setHidden(not should_show)
+                changed = True
+        if changed:
+            self._refresh_config_group_layout(force=True)
 
     @staticmethod
     def _configure_form_layout(form: QFormLayout) -> None:
@@ -1477,7 +1837,7 @@ class MIDataCollectorWindow(QMainWindow):
             QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QTextEdit {
                 border: 1px solid #CBD5E1;
                 border-radius: 11px;
-                padding: 7px 10px;
+                padding: 6px 9px;
                 background: #FFFFFF;
                 selection-background-color: #2563EB;
                 selection-color: #FFFFFF;
@@ -1488,7 +1848,7 @@ class MIDataCollectorWindow(QMainWindow):
             QPushButton {
                 border: 1px solid transparent;
                 border-radius: 12px;
-                padding: 10px 16px;
+                padding: 8px 14px;
                 font-weight: bold;
                 background: #1D4ED8;
                 color: #FFFFFF;
@@ -1585,9 +1945,9 @@ class MIDataCollectorWindow(QMainWindow):
         session_panel = self._build_session_panel()
         self.main_splitter.addWidget(self.config_panel_widget)
         self.main_splitter.addWidget(session_panel)
-        self.main_splitter.setStretchFactor(0, 6)
-        self.main_splitter.setStretchFactor(1, 4)
-        self.main_splitter.setSizes([1080, 760])
+        self.main_splitter.setStretchFactor(0, 11)
+        self.main_splitter.setStretchFactor(1, 9)
+        self.main_splitter.setSizes([920, 820])
         self.main_splitter.splitterMoved.connect(lambda _pos, _idx: self._refresh_config_group_layout())
         self.body_layout.addWidget(self.main_splitter, stretch=1)
 
@@ -1608,86 +1968,325 @@ class MIDataCollectorWindow(QMainWindow):
         self._apply_responsive_typography()
         self.statusBar().showMessage("准备就绪")
         self._update_responsive_chrome()
+        self._refresh_preview_text_heights()
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
         self._apply_responsive_typography()
         self._refresh_config_group_layout()
-        self._update_responsive_chrome()
+        self._update_responsive_chrome(force=True)
         self._refresh_preview_text_heights()
 
-    def _update_responsive_chrome(self) -> None:
-        compact = self.height() < 880 or self.width() < 1500
-        ultra_compact = self.height() < 720 or self.width() < 1100
-        stacked = self.width() < 900
+    def _update_responsive_chrome(self, *, force: bool = False) -> None:
+        width = self.width()
+        height = self.height()
+        ui_mode = self._current_ui_mode()
+        compact = height < 880 or width < 1500
+        ultra_compact = height < 720 or width < 1100
+        stacked = width < 900
+        preview_focus = ui_mode == "preview"
+        signature = (int(width), int(height), ui_mode)
+        if not force and signature == self._responsive_chrome_signature:
+            return
+        self._responsive_chrome_signature = signature
+
+        if preview_focus:
+            outer_margin = 8 if ultra_compact else 10 if compact else 12
+            section_spacing = 6 if ultra_compact else 8 if compact else 10
+        elif ui_mode == "startup":
+            outer_margin = 12 if ultra_compact else 16 if compact else 20
+            section_spacing = 10 if ultra_compact else 12 if compact else 16
+        else:
+            outer_margin = 10 if ultra_compact else 14 if compact else 18
+            section_spacing = 8 if ultra_compact else 10 if compact else 14
+
         if self.root_layout is not None:
-            self.root_layout.setContentsMargins(10 if ultra_compact else 14 if compact else 18, 10 if ultra_compact else 14 if compact else 18, 10 if ultra_compact else 14 if compact else 18, 10 if ultra_compact else 14 if compact else 18)
-            self.root_layout.setSpacing(8 if ultra_compact else 10 if compact else 14)
+            self.root_layout.setContentsMargins(outer_margin, outer_margin, outer_margin, outer_margin)
+            self.root_layout.setSpacing(section_spacing)
         if self.body_layout is not None:
-            self.body_layout.setSpacing(8 if ultra_compact else 10 if compact else 14)
+            self.body_layout.setSpacing(section_spacing)
         if self.hero_subtitle_label is not None:
-            self.hero_subtitle_label.setVisible(not ultra_compact)
+            self.hero_subtitle_label.setVisible(ui_mode == "startup" and not ultra_compact)
+        if self.hero_title_label is not None:
+            self.hero_title_label.setVisible(ui_mode == "startup")
         if self.config_tip_label is not None:
-            self.config_tip_label.setVisible(not ultra_compact)
+            self.config_tip_label.setVisible(ui_mode == "startup" and not ultra_compact)
+        if self.preview_group is not None:
+            self.preview_group.setVisible(ui_mode != "startup")
+        if self.session_tabs is not None:
+            self.session_tabs.setVisible(ui_mode != "preview")
         if self.log_group is not None:
-            self.log_group.setVisible(not ultra_compact)
+            self.log_group.setVisible(not ultra_compact and ui_mode != "preview")
         if self.log_text is not None:
-            self.log_text.setMinimumHeight(64 if ultra_compact else 72 if compact else 92)
+            if self.session_running:
+                self.log_text.setMinimumHeight(56 if ultra_compact else 60 if compact else 76)
+            else:
+                self.log_text.setMinimumHeight(64 if ultra_compact else 72 if compact else 92)
+
         if self.main_splitter is not None:
             desired_orientation = Qt.Vertical if stacked else Qt.Horizontal
             if self.main_splitter.orientation() != desired_orientation:
                 self.main_splitter.setOrientation(desired_orientation)
                 if desired_orientation == Qt.Vertical:
-                    self.main_splitter.setSizes([int(self.height() * 0.40), int(self.height() * 0.60)])
+                    self._set_splitter_sizes_if_needed(int(height * 0.40), int(height * 0.60))
                 else:
-                    self.main_splitter.setSizes([1080, 760])
+                    self._set_splitter_sizes_if_needed(920, 820)
                 self._refresh_config_group_layout(force=True)
             if stacked:
                 self.main_splitter.setStretchFactor(0, 4)
                 self.main_splitter.setStretchFactor(1, 6)
+            elif preview_focus:
+                self.main_splitter.setStretchFactor(0, 4)
+                self.main_splitter.setStretchFactor(1, 16)
+            elif ui_mode == "startup":
+                self.main_splitter.setStretchFactor(0, 13)
+                self.main_splitter.setStretchFactor(1, 9)
             elif compact:
                 self.main_splitter.setStretchFactor(0, 5)
                 self.main_splitter.setStretchFactor(1, 5)
             else:
-                self.main_splitter.setStretchFactor(0, 6)
-                self.main_splitter.setStretchFactor(1, 4)
+                self.main_splitter.setStretchFactor(0, 11)
+                self.main_splitter.setStretchFactor(1, 9)
+
         if self.preview_widget is not None:
-            self.preview_widget.setMinimumHeight(260 if ultra_compact else 320 if compact else 420)
+            if preview_focus:
+                self.preview_widget.setMinimumHeight(480 if ultra_compact else 520 if compact else 560)
+            elif ui_mode == "startup":
+                self.preview_widget.setMinimumHeight(320 if ultra_compact else 380 if compact else 460)
+            else:
+                self.preview_widget.setMinimumHeight(280 if ultra_compact else 340 if compact else 460)
+
         if self.session_panel_layout is not None:
-            if ultra_compact:
+            if preview_focus:
+                self.session_panel_layout.setStretch(0, 1)
+                self.session_panel_layout.setStretch(1, 0)
+            elif ui_mode == "startup":
+                self.session_panel_layout.setStretch(0, 0)
+                self.session_panel_layout.setStretch(1, 1)
+            elif ultra_compact:
                 self.session_panel_layout.setStretch(0, 4)
                 self.session_panel_layout.setStretch(1, 3)
             elif compact:
-                self.session_panel_layout.setStretch(0, 5)
+                self.session_panel_layout.setStretch(0, 6)
                 self.session_panel_layout.setStretch(1, 3)
             else:
-                self.session_panel_layout.setStretch(0, 5)
+                self.session_panel_layout.setStretch(0, 6)
                 self.session_panel_layout.setStretch(1, 2)
+
         if self.session_tabs is not None:
             self.session_tabs.setDocumentMode(compact)
             self.session_tabs.tabBar().setExpanding(True)
+        if self.preview_group is not None:
+            if ui_mode == "preview":
+                self.preview_group.setTitle("质量检查（EEG / 阻抗）")
+            elif ui_mode == "startup":
+                self.preview_group.setTitle("EEG / 阻抗预览")
+            else:
+                self.preview_group.setTitle("采集中监看（EEG / 阻抗）")
         if self.protocol_text_label is not None:
             protocol_text = self._protocol_copy(compact=compact, ultra_compact=ultra_compact)
             if self.protocol_text_label.text() != protocol_text:
                 self.protocol_text_label.setText(protocol_text)
+        self._apply_preview_focus_layout()
+
+    def _preview_stream_available(self) -> bool:
+        if self.device_info is not None:
+            channel_names = self.device_info.get("channel_names", [])
+            if isinstance(channel_names, list) and channel_names:
+                return True
+            selected_rows = self.device_info.get("selected_rows", [])
+            if isinstance(selected_rows, list) and selected_rows:
+                return True
+        return (
+            self.preview_widget is not None
+            and bool(self.preview_widget.channel_names)
+            and float(self.preview_widget.sampling_rate) > 0.0
+        )
+
+    def _preview_focus_active(self) -> bool:
+        return self.device_info is not None and not self.session_running and not self.waiting_for_save
+
+    def _apply_preview_focus_layout(self, *, force: bool = False) -> None:
+        ui_mode = self._current_ui_mode()
+        preview_focus = ui_mode == "preview"
+        del force
+        self._preview_focus_layout_active = preview_focus
+
+        if self.session_tabs is not None:
+            self.session_tabs.setVisible(ui_mode != "preview")
+        if self.preview_group is not None:
+            self.preview_group.setVisible(ui_mode != "startup")
+        if self.config_panel_widget is not None:
+            if preview_focus and self.main_splitter is not None and self.main_splitter.orientation() == Qt.Horizontal:
+                if self.width() >= 1750:
+                    max_width = 460
+                elif self.width() >= 1600:
+                    max_width = 430
+                elif self.width() >= 1400:
+                    max_width = 390
+                elif self.width() >= 1150:
+                    max_width = 340
+                else:
+                    max_width = 300
+                self.config_panel_widget.setMaximumWidth(max_width)
+            else:
+                self.config_panel_widget.setMaximumWidth(16777215)
+
+        if self.main_splitter is not None and self.main_splitter.orientation() == Qt.Horizontal:
+            total = sum(self.main_splitter.sizes())
+            if total <= 0:
+                total = max(900, self.width() - 80)
+            if preview_focus:
+                if total <= 0:
+                    total = max(900, self.width() - 80)
+                if self.width() >= 1750:
+                    config_width = max(360, min(460, int(total * 0.24)))
+                elif self.width() >= 1600:
+                    config_width = max(340, min(430, int(total * 0.25)))
+                elif self.width() >= 1400:
+                    config_width = max(310, min(390, int(total * 0.26)))
+                elif self.width() >= 1150:
+                    config_width = max(280, min(340, int(total * 0.27)))
+                else:
+                    config_width = max(240, min(300, int(total * 0.28)))
+                min_preview_width = 680 if self.width() < 1150 else 760 if self.width() < 1400 else 820
+                config_width = min(config_width, max(240, int(total - min_preview_width)))
+                preview_width = max(600, int(total - config_width))
+                self._set_splitter_sizes_if_needed(config_width, preview_width)
+            elif ui_mode == "startup":
+                if self.width() >= 1750:
+                    config_width = max(980, min(1120, int(total * 0.58)))
+                elif self.width() >= 1600:
+                    config_width = max(900, min(1020, int(total * 0.57)))
+                elif self.width() >= 1400:
+                    config_width = max(760, min(900, int(total * 0.56)))
+                elif self.width() >= 1150:
+                    config_width = max(620, min(740, int(total * 0.57)))
+                else:
+                    config_width = max(540, min(620, int(total * 0.58)))
+                overview_width = max(320, int(total - config_width))
+                self._set_splitter_sizes_if_needed(config_width, overview_width)
+            else:
+                self._set_splitter_sizes_if_needed(920, 820)
+
+        self._refresh_config_group_layout(force=True)
+        self._apply_preview_controls_layout()
+        self._refresh_preview_text_heights()
+
+    def _apply_preview_controls_layout(self) -> None:
+        if self.preview_layout is None or self.preview_control_layout is None:
+            return
+        if self.preview_status_label is None or self.preview_mode_label is None:
+            return
+
+        preview_focus = self._preview_focus_active()
+        preview_width = self.preview_group.width() if self.preview_group is not None else self.width()
+        wide_focus_toolbar = preview_focus and preview_width >= 620
+        show_full_focus_labels = preview_focus and preview_width >= 980
+
+        self.preview_status_label.setVisible(not preview_focus)
+        self.preview_status_label.setStyleSheet(
+            "color: #334155; background: #F8FAFC; border-radius: 8px; padding: 8px 10px;"
+        )
+        self.preview_status_label.setMinimumHeight(0 if preview_focus else 46)
+
+        self.preview_layout.setContentsMargins(4 if preview_focus else 9, 4 if preview_focus else 9, 4 if preview_focus else 9, 4 if preview_focus else 9)
+        self.preview_layout.setSpacing(4 if preview_focus else 9)
+        self.preview_control_layout.setHorizontalSpacing(5 if preview_focus else 8)
+        self.preview_control_layout.setVerticalSpacing(3 if preview_focus else 8)
+        self.preview_control_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.preview_mode_label.setWordWrap(not wide_focus_toolbar)
+        self.preview_mode_label.setStyleSheet(
+            "color: #0F172A; font-weight: 600;"
+            if not preview_focus
+            else "color: #0F172A; font-weight: 600; background: #E0F2FE; border: 1px solid #BAE6FD; border-radius: 10px; padding: 6px 10px;"
+        )
+
+        buttons = (
+            self.preview_to_eeg_button,
+            self.preview_to_imp_button,
+        )
+        short_texts = {
+            self.preview_to_eeg_button: "EEG",
+            self.preview_to_imp_button: "阻抗",
+        }
+        full_texts = {
+            self.preview_to_eeg_button: "EEG模式",
+            self.preview_to_imp_button: "阻抗模式",
+        }
+        for button in buttons:
+            if button is None:
+                continue
+            self.preview_control_layout.removeWidget(button)
+            button_text = full_texts[button] if (not preview_focus or show_full_focus_labels) else short_texts[button]
+            button.setText(button_text)
+            button.setToolTip(full_texts[button])
+            button.setMinimumHeight(28 if preview_focus else 34)
+            button.setMinimumWidth(button.fontMetrics().horizontalAdvance(button_text) + (24 if preview_focus else 28))
+            if preview_focus:
+                button.setMaximumHeight(32)
+                button.setStyleSheet("padding: 3px 8px;")
+            else:
+                button.setMaximumHeight(16777215)
+                button.setStyleSheet("")
+        self.preview_control_layout.removeWidget(self.preview_mode_label)
+
+        while self.preview_control_layout.count():
+            item = self.preview_control_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.hide()
+
+        controls_in_order = [
+            self.preview_mode_label,
+            self.preview_to_eeg_button,
+            self.preview_to_imp_button,
+        ]
+        for widget in controls_in_order:
+            if widget is not None:
+                widget.show()
+        for widget in (self.preview_prev_ch_button, self.preview_next_ch_button, self.preview_reset_button):
+            if widget is not None:
+                widget.hide()
+
+        if wide_focus_toolbar:
+            self.preview_control_layout.addWidget(self.preview_mode_label, 0, 0, 1, 2)
+            self.preview_control_layout.addWidget(self.preview_to_eeg_button, 0, 2)
+            self.preview_control_layout.addWidget(self.preview_to_imp_button, 0, 3)
+            for index in range(4):
+                self.preview_control_layout.setColumnStretch(index, 0 if index >= 2 else 1)
+        elif preview_focus:
+            self.preview_control_layout.addWidget(self.preview_mode_label, 0, 0, 1, 2)
+            self.preview_control_layout.addWidget(self.preview_to_eeg_button, 1, 0)
+            self.preview_control_layout.addWidget(self.preview_to_imp_button, 1, 1)
+            for index in range(2):
+                self.preview_control_layout.setColumnStretch(index, 1)
+        else:
+            self.preview_control_layout.addWidget(self.preview_mode_label, 0, 0, 1, 2)
+            self.preview_control_layout.addWidget(self.preview_to_eeg_button, 1, 0)
+            self.preview_control_layout.addWidget(self.preview_to_imp_button, 1, 1)
+            self.preview_control_layout.setColumnStretch(0, 1)
+            self.preview_control_layout.setColumnStretch(1, 1)
+        self._refresh_preview_toggle_button_styles()
 
     def _protocol_copy(self, *, compact: bool, ultra_compact: bool) -> str:
         if ultra_compact:
             return (
                 "操作员：先完成连接质量检查，再开始正式采集。\n"
-                "流程：静息/伪迹校准 → 想象训练 → 主任务 → 无控制/连续仿真。\n"
+                "入口：完整流程，或仅 MI 主任务（跳过静息/伪迹/无控制/连续仿真）。\n"
                 "单试次默认：注视 2s → 提示 1s → 想象 4s → 放松 2.5s。"
             )
         if compact:
             return (
                 "操作员：连接后先检查波形和接触质量，稳定后开始正式采集。\n"
-                "流程：静息/伪迹校准 → 想象训练 → 多轮次主任务 → 无控制 → 连续仿真。\n"
-                "连续仿真插在 MI run 边界；单试次默认：注视 2s → 提示 1s → 想象 4s → 放松 2.5s。"
+                "入口：完整流程，或仅 MI 主任务（跳过静息/伪迹/无控制/连续仿真）。\n"
+                "单试次默认：注视 2s → 提示 1s → 想象 4s → 放松 2.5s。"
             )
         return (
             "操作员流程：连接设备后先在当前界面观察原始波形并调整参数，确认稳定后再开始正式采集。\n"
-            "正式流程：静息/伪迹校准 → 想象训练 → 多轮次主任务 → 无控制 → 连续仿真。\n"
-            "连续仿真默认会按 MI run 边界拆开插入，不再全部堆到最后。\n"
+            "入口一：完整流程，包含静息/伪迹校准 → 多轮次主任务 → 无控制 → 连续仿真；想象训练保留为可选阶段，默认关闭。\n"
+            "入口二：仅 MI 主任务，直接进入四分类 MI trial，跳过静息、伪迹、无控制和连续仿真块。\n"
             "主任务单试次固定顺序：注视 2s → 提示(1s) → 想象(4s) → 放松(2.5s)。\n"
             "点击开始后，如勾选受试者全屏，当前屏幕会直接切到受试者提示界面。"
         )
@@ -1697,6 +2296,7 @@ class MIDataCollectorWindow(QMainWindow):
             (self.preview_status_label, 24, 46),
             (self.preview_mode_label, 12, 22),
             (self.protocol_text_label, 24, 120),
+            (self.config_tip_label, 18, 60),
         )
         for label, padding, minimum in label_specs:
             if label is None:
@@ -1718,8 +2318,9 @@ class MIDataCollectorWindow(QMainWindow):
     def _build_typography_profile(self) -> dict[str, int]:
         width = max(1, self.width())
         height = max(1, self.height())
+        preview_focus = self._preview_focus_active()
         if width >= 1600 and height >= 900:
-            return {
+            profile = {
                 "form": 14,
                 "section": 14,
                 "small": 13,
@@ -1733,8 +2334,8 @@ class MIDataCollectorWindow(QMainWindow):
                 "instruction": 17,
                 "banner": 16,
             }
-        if width >= 1400 and height >= 820:
-            return {
+        elif width >= 1400 and height >= 820:
+            profile = {
                 "form": 13,
                 "section": 14,
                 "small": 12,
@@ -1748,20 +2349,167 @@ class MIDataCollectorWindow(QMainWindow):
                 "instruction": 16,
                 "banner": 15,
             }
-        return {
-            "form": 12,
-            "section": 13,
-            "small": 12,
-            "tab": 12,
-            "button": 12,
-            "button_height": 34,
-            "group": 12,
-            "hero": 22,
-            "phase": 24,
-            "countdown": 19,
-            "instruction": 15,
-            "banner": 14,
-        }
+        else:
+            profile = {
+                "form": 12,
+                "section": 13,
+                "small": 12,
+                "tab": 12,
+                "button": 12,
+                "button_height": 34,
+                "group": 12,
+                "hero": 22,
+                "phase": 24,
+                "countdown": 19,
+                "instruction": 15,
+                "banner": 14,
+            }
+
+        if preview_focus:
+            if width >= 1400:
+                reductions = {
+                    "form": (12, 1),
+                    "section": (13, 1),
+                    "small": (12, 1),
+                    "tab": (12, 1),
+                    "button": (12, 1),
+                    "group": (12, 1),
+                    "hero": (23, 1),
+                    "phase": (25, 1),
+                    "countdown": (19, 1),
+                    "instruction": (15, 1),
+                    "banner": (14, 1),
+                }
+                for key, (floor, delta) in reductions.items():
+                    profile[key] = max(floor, int(profile[key]) - delta)
+                profile["button_height"] = max(34, int(profile["button_height"]) - 2)
+            elif width >= 1100:
+                reductions = {
+                    "section": (12, 1),
+                    "tab": (11, 1),
+                    "button": (11, 1),
+                    "group": (11, 1),
+                }
+                for key, (floor, delta) in reductions.items():
+                    profile[key] = max(floor, int(profile[key]) - delta)
+                profile["button_height"] = max(32, int(profile["button_height"]) - 1)
+
+        return profile
+
+    def _refresh_control_button_chrome(
+        self,
+        *,
+        preview_only_mode: bool,
+        desired_columns: int,
+        spacing: int,
+        estimated_row_height: int,
+    ) -> None:
+        active_buttons = self._visible_control_buttons_in_display_order()
+        if not active_buttons:
+            return
+
+        def _button_text(button: QPushButton) -> str:
+            name = button.objectName()
+            primary_default_map = {
+                "btnConnect": "连接设备",
+                "btnStart": "开始完整流程",
+                "btnStartMiOnly": "直接进入 MI 主任务",
+                "btnDisconnect": "断开设备",
+            }
+            primary_preview_map = {
+                "btnConnect": "连接设备",
+                "btnStart": "开始完整流程",
+                "btnStartMiOnly": "直接进入 MI 主任务",
+                "btnDisconnect": "断开设备",
+            }
+            if name in primary_default_map:
+                mapping = primary_preview_map if preview_only_mode else primary_default_map
+                return mapping.get(name, button.text().replace("\n", ""))
+            warn_text = "标记命令失败" if self.current_phase == "continuous" else "标记坏试次"
+            default_map = {
+                "btnConnect": "连接设备",
+                "btnStart": "开始完整流程",
+                "btnStartMiOnly": "直接进入MI主任务",
+                "btnPause": "继续" if self.session_paused else "暂停",
+                "btnWarn": warn_text,
+                "btnStop": "停止并保存",
+                "btnDisconnect": "断开设备",
+            }
+            preview_map = {
+                "btnConnect": "连接\n设备",
+                "btnStart": "完整\n流程",
+                "btnStartMiOnly": "仅MI\n主任务",
+                "btnPause": "继续" if self.session_paused else "暂停",
+                "btnWarn": "标记\n命令失败" if self.current_phase == "continuous" else "标记\n坏试次",
+                "btnStop": "停止\n并保存",
+                "btnDisconnect": "断开\n设备",
+            }
+            mapping = preview_map if preview_only_mode else default_map
+            return mapping.get(name, button.text().replace("\n", ""))
+
+        for button in active_buttons:
+            next_text = _button_text(button)
+            if button.text() != next_text:
+                button.setText(next_text)
+
+        if preview_only_mode and self.control_group is not None:
+            control_rect = self.control_group.contentsRect()
+            column_width = max(
+                120,
+                int((control_rect.width() - spacing * max(0, desired_columns - 1)) / float(max(1, desired_columns))),
+            )
+            vertical_padding = int(np.clip(estimated_row_height * 0.08, 8, 18))
+            horizontal_padding = 16 if desired_columns >= 2 else 20
+            radius = int(np.clip(estimated_row_height * 0.12, 14, 24))
+            font_size = int(np.clip(estimated_row_height * (0.12 if desired_columns >= 2 else 0.10), 16, 28))
+            while font_size > 12:
+                metrics = QFontMetrics(QFont("Microsoft YaHei", font_size, QFont.DemiBold))
+                widest_label = max(
+                    max(metrics.horizontalAdvance(line) for line in button.text().splitlines() or [""])
+                    for button in active_buttons
+                )
+                if widest_label + horizontal_padding * 2 <= column_width - 12:
+                    break
+                font_size -= 1
+            signature: tuple[object, ...] = (
+                "preview",
+                desired_columns,
+                column_width,
+                estimated_row_height,
+                font_size,
+                vertical_padding,
+                horizontal_padding,
+                radius,
+            )
+            if signature == self._control_button_signature:
+                return
+            self._control_button_signature = signature
+            button_font = QFont("Microsoft YaHei", font_size, QFont.DemiBold)
+            button_style = (
+                "QPushButton { "
+                f"padding: {vertical_padding}px {horizontal_padding}px; "
+                f"border-radius: {radius}px; "
+                "}"
+                "QPushButton:disabled { "
+                "background: #DCE5F0; "
+                "color: #7B8794; "
+                "border: 1px solid #D0D8E3; "
+                "}"
+            )
+            for button in active_buttons:
+                button.setFont(button_font)
+                button.setStyleSheet(button_style)
+            return
+
+        profile = self._build_typography_profile()
+        signature = ("default", desired_columns, int(profile["button"]), int(profile["button_height"]))
+        if signature == self._control_button_signature:
+            return
+        self._control_button_signature = signature
+        button_font = QFont("Microsoft YaHei", int(profile["button"]), QFont.DemiBold)
+        for button in active_buttons:
+            button.setFont(button_font)
+            button.setStyleSheet("")
 
     def _apply_responsive_typography(self) -> None:
         profile = self._build_typography_profile()
@@ -1841,6 +2589,7 @@ class MIDataCollectorWindow(QMainWindow):
     def _build_config_panel(self) -> QWidget:
         panel = QWidget()
         layout = QVBoxLayout(panel)
+        self.config_panel_layout = layout
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
 
@@ -1858,7 +2607,9 @@ class MIDataCollectorWindow(QMainWindow):
 
         self.board_combo = QComboBox()
         for label, board_id in available_board_options():
-            self.board_combo.addItem(f"{label} ({board_id})", board_id)
+            self.board_combo.addItem(label, board_id)
+            index = self.board_combo.count() - 1
+            self.board_combo.setItemData(index, f"{label} ({board_id})", Qt.ToolTipRole)
         self.board_combo.currentIndexChanged.connect(self.refresh_board_input_state)
 
         self.serial_combo = QComboBox()
@@ -1896,7 +2647,6 @@ class MIDataCollectorWindow(QMainWindow):
         self.seed_spin.setRange(100000, 999999)
         self.seed_spin.setReadOnly(True)
         self.seed_spin.setToolTip("每次开始采集时自动生成并保存到会话元数据")
-        self.save_epochs_check = QCheckBox("同时导出 *_epochs.npz（自动编号）")
         self.separate_screen_check = QCheckBox("开始采集后弹出受试者全屏提示窗")
         self.notes_edit = QTextEdit()
         self.notes_edit.setMinimumHeight(64)
@@ -2035,7 +2785,6 @@ class MIDataCollectorWindow(QMainWindow):
         export_form = QFormLayout(export_group)
         self._configure_form_layout(export_form)
         export_form.addRow("随机种子（自动）", self.seed_spin)
-        export_form.addRow("", self.save_epochs_check)
         export_form.addRow("", self.separate_screen_check)
 
         calibration_group = QGroupBox("质量检查与静息")
@@ -2045,7 +2794,7 @@ class MIDataCollectorWindow(QMainWindow):
         calibration_form.addRow("睁眼静息（秒）", self.calib_open_spin)
         calibration_form.addRow("闭眼静息（秒）", self.calib_closed_spin)
         calibration_form.addRow("", self.eyes_closed_for_gate_check)
-        calibration_form.addRow("想象训练（秒）", self.practice_spin)
+        calibration_form.addRow("想象训练（秒，0=关闭）", self.practice_spin)
 
         artifact_group = QGroupBox("伪迹校准")
         artifact_form = QFormLayout(artifact_group)
@@ -2077,12 +2826,16 @@ class MIDataCollectorWindow(QMainWindow):
 
         control_group = QGroupBox("操作")
         control_layout = QGridLayout(control_group)
+        self.control_group = control_group
+        self.control_layout = control_layout
         control_layout.setHorizontalSpacing(10)
         control_layout.setVerticalSpacing(10)
         self.connect_button = QPushButton("连接设备")
         self.connect_button.setObjectName("btnConnect")
-        self.start_button = QPushButton("开始采集")
+        self.start_button = QPushButton("开始完整流程")
         self.start_button.setObjectName("btnStart")
+        self.start_mi_only_button = QPushButton("直接进入 MI 主任务")
+        self.start_mi_only_button.setObjectName("btnStartMiOnly")
         self.pause_button = QPushButton("暂停")
         self.pause_button.setObjectName("btnPause")
         self.bad_trial_button = QPushButton("标记坏试次")
@@ -2093,16 +2846,18 @@ class MIDataCollectorWindow(QMainWindow):
         self.disconnect_button.setObjectName("btnDisconnect")
         self.connect_button.clicked.connect(self.connect_device)
         self.start_button.clicked.connect(self.start_session)
+        self.start_mi_only_button.clicked.connect(self.start_mi_only_session)
         self.pause_button.clicked.connect(self.toggle_pause)
         self.bad_trial_button.clicked.connect(self.mark_bad_trial)
         self.stop_button.clicked.connect(self.stop_and_save)
         self.disconnect_button.clicked.connect(self.disconnect_device)
         control_layout.addWidget(self.connect_button, 0, 0)
         control_layout.addWidget(self.start_button, 0, 1)
-        control_layout.addWidget(self.pause_button, 0, 2)
-        control_layout.addWidget(self.bad_trial_button, 1, 0)
-        control_layout.addWidget(self.stop_button, 1, 1)
-        control_layout.addWidget(self.disconnect_button, 1, 2)
+        control_layout.addWidget(self.start_mi_only_button, 0, 2)
+        control_layout.addWidget(self.pause_button, 1, 0)
+        control_layout.addWidget(self.bad_trial_button, 1, 1)
+        control_layout.addWidget(self.stop_button, 1, 2)
+        control_layout.addWidget(self.disconnect_button, 2, 1)
         control_layout.setColumnStretch(0, 1)
         control_layout.setColumnStretch(1, 1)
         control_layout.setColumnStretch(2, 1)
@@ -2119,10 +2874,24 @@ class MIDataCollectorWindow(QMainWindow):
             post_group,
             continuous_group,
         ]
+        self.config_forms = [
+            session_form,
+            participant_form,
+            notes_form,
+            board_form,
+            timing_form,
+            run_form,
+            export_form,
+            calibration_form,
+            artifact_form,
+            post_form,
+            continuous_form,
+        ]
         section_row = QHBoxLayout()
         section_row.setContentsMargins(0, 0, 0, 0)
         section_row.setSpacing(8)
         section_label = QLabel("配置分区")
+        self.config_section_label = section_label
         section_label.setStyleSheet("color: #475569;")
         self.config_section_combo = QComboBox()
         self.config_section_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -2144,22 +2913,35 @@ class MIDataCollectorWindow(QMainWindow):
             self.config_section_combo.addItem(title)
             self.config_stack.addWidget(group)
         self.config_section_combo.currentIndexChanged.connect(self.config_stack.setCurrentIndex)
+        default_section_index = self.config_section_combo.findText("设备")
+        if default_section_index < 0:
+            default_section_index = 0
+        self.config_section_combo.setCurrentIndex(default_section_index)
         section_row.addWidget(section_label, stretch=0)
         section_row.addWidget(self.config_section_combo, stretch=1)
         layout.addLayout(section_row)
+        self.config_stack.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         layout.addWidget(self.config_stack, stretch=1)
-        control_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
-        layout.addWidget(control_group, stretch=0)
-        self._refresh_config_group_layout(force=True)
 
         self.config_tip_label = QLabel(
-            "连接设备后先在右侧原始波形面板完成实验员测试；若勾选“弹出受试者全屏提示窗”，点击“开始采集”后会直接切到受试者全屏。"
+            "连接设备后先在右侧原始波形面板完成实验员测试；若勾选“弹出受试者全屏提示窗”，点击“开始完整流程”或“直接进入 MI 主任务”后会直接切到受试者全屏。"
             "运行中快捷键：空格 暂停/继续，B 标记坏试次（连续模式下标记命令失败），"
             "N 提前结束训练/质检阶段，Esc 停止并保存。"
         )
         self.config_tip_label.setWordWrap(True)
         self.config_tip_label.setStyleSheet("color: #475569; padding: 4px;")
-        layout.addWidget(self.config_tip_label)
+        bottom_panel = QWidget()
+        self.config_bottom_panel = bottom_panel
+        bottom_layout = QVBoxLayout(bottom_panel)
+        bottom_layout.setContentsMargins(0, 0, 0, 0)
+        bottom_layout.setSpacing(8)
+        bottom_panel.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        control_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        bottom_layout.addWidget(control_group, stretch=0)
+        self.config_tip_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        bottom_layout.addWidget(self.config_tip_label, stretch=0)
+        layout.addWidget(bottom_panel, stretch=0)
+        self._refresh_config_group_layout(force=True)
         return panel
 
     def _build_focus_panel(self) -> QWidget:
@@ -2199,7 +2981,7 @@ class MIDataCollectorWindow(QMainWindow):
         self.cue_widget = CueIllustrationWidget()
         cue_layout.addWidget(self.cue_widget, stretch=1)
 
-        self.instruction_label = QLabel("连接设备后点击“开始采集”。")
+        self.instruction_label = QLabel("连接设备后可选择“开始完整流程”或“直接进入 MI 主任务”。")
         self.instruction_label.setWordWrap(True)
         self.instruction_label.setStyleSheet(
             "color: #0F172A; background: #FFFFFF; border: 1px solid #CBD5E1; border-radius: 12px; padding: 12px;"
@@ -2262,8 +3044,10 @@ class MIDataCollectorWindow(QMainWindow):
             status_layout.addWidget(label)
         status_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
 
-        preview_group = QGroupBox("连接后质量检查（EEG / 阻抗，5 秒窗）")
+        preview_group = QGroupBox("质量检查（EEG / 阻抗）")
+        self.preview_group = preview_group
         preview_layout = QVBoxLayout(preview_group)
+        self.preview_layout = preview_layout
         self.preview_status_label = QLabel(
             "连接后先在这里做质量检查。EEG 预览采用 FBCCA 风格的仅显示预处理，采集保存的数据始终保持原始数据。"
         )
@@ -2276,6 +3060,7 @@ class MIDataCollectorWindow(QMainWindow):
         preview_layout.addWidget(self.preview_status_label)
 
         preview_control_layout = QGridLayout()
+        self.preview_control_layout = preview_control_layout
         preview_control_layout.setHorizontalSpacing(8)
         preview_control_layout.setVerticalSpacing(8)
         self.preview_mode_label = QLabel("质量检查模式：等待设备连接")
@@ -2306,19 +3091,18 @@ class MIDataCollectorWindow(QMainWindow):
         self.preview_prev_ch_button.clicked.connect(self.on_preview_prev_channel_clicked)
         self.preview_next_ch_button.clicked.connect(self.on_preview_next_channel_clicked)
         self.preview_reset_button.clicked.connect(self.on_preview_reset_clicked)
+        self.preview_prev_ch_button.hide()
+        self.preview_next_ch_button.hide()
+        self.preview_reset_button.hide()
 
         preview_control_layout.addWidget(self.preview_to_eeg_button, 1, 0)
         preview_control_layout.addWidget(self.preview_to_imp_button, 1, 1)
-        preview_control_layout.addWidget(self.preview_reset_button, 1, 2)
-        preview_control_layout.addWidget(self.preview_prev_ch_button, 2, 0)
-        preview_control_layout.addWidget(self.preview_next_ch_button, 2, 1)
         preview_control_layout.setColumnStretch(0, 1)
         preview_control_layout.setColumnStretch(1, 1)
-        preview_control_layout.setColumnStretch(2, 1)
         preview_layout.addLayout(preview_control_layout)
 
         self.preview_widget = RealtimeEEGPreviewWidget(window_seconds=5.0)
-        self.preview_widget.setMinimumHeight(420)
+        self.preview_widget.setMinimumHeight(460)
         preview_layout.addWidget(self.preview_widget, stretch=1)
         self.session_panel_layout.addWidget(preview_group, stretch=5)
 
@@ -2406,7 +3190,6 @@ class MIDataCollectorWindow(QMainWindow):
         if configured_seed < self.seed_spin.minimum() or configured_seed > self.seed_spin.maximum():
             configured_seed = self._generate_session_seed()
         self.seed_spin.setValue(configured_seed)
-        self.save_epochs_check.setChecked(bool(self.config["save_epochs_npz"]))
         self.separate_screen_check.setChecked(bool(self.config.get("use_separate_participant_screen", True)))
         self.use_separate_participant_screen = bool(self.separate_screen_check.isChecked())
         self.notes_edit.setPlainText(self.config["notes"])
@@ -2536,6 +3319,7 @@ class MIDataCollectorWindow(QMainWindow):
             cue_sec=float(self.cue_spin.value()),
             imagery_sec=float(self.imagery_spin.value()),
             iti_sec=float(self.iti_spin.value()),
+            protocol_mode=PROTOCOL_MODE_FULL,
             run_count=run_count,
             max_consecutive_same_class=int(self.max_consecutive_spin.value()),
             run_rest_sec=float(self.run_rest_spin.value()),
@@ -2568,10 +3352,38 @@ class MIDataCollectorWindow(QMainWindow):
             recent_exercise=str(self.exercise_combo.currentData()),
             sleep_note=self.sleep_edit.text().strip(),
             random_seed=int(self.seed_spin.value()),
-            save_epochs_npz=bool(self.save_epochs_check.isChecked()),
             operator="",
             notes=self.notes_edit.toPlainText().strip(),
             board_name=self.board_display_name(),
+        )
+
+    @staticmethod
+    def _protocol_mode_label(protocol_mode: str) -> str:
+        return "仅 MI 主任务" if str(protocol_mode) == PROTOCOL_MODE_MI_ONLY else "完整流程"
+
+    def _apply_protocol_mode_overrides(self, settings: SessionSettings) -> SessionSettings:
+        if str(settings.protocol_mode) != PROTOCOL_MODE_MI_ONLY:
+            return settings
+        return replace(
+            settings,
+            practice_sec=0.0,
+            calibration_open_sec=0.0,
+            calibration_closed_sec=0.0,
+            calibration_eye_sec=0.0,
+            calibration_blink_sec=0.0,
+            calibration_swallow_sec=0.0,
+            calibration_jaw_sec=0.0,
+            calibration_head_sec=0.0,
+            run_rest_sec=0.0,
+            long_run_rest_every=0,
+            long_run_rest_sec=0.0,
+            idle_block_count=0,
+            idle_block_sec=0.0,
+            idle_prepare_block_count=0,
+            idle_prepare_sec=0.0,
+            continuous_block_count=0,
+            continuous_block_sec=0.0,
+            include_eyes_closed_rest_in_gate_neg=False,
         )
 
     def on_worker_status(self, message: str) -> None:
@@ -2627,7 +3439,6 @@ class MIDataCollectorWindow(QMainWindow):
             self.exercise_combo,
             self.sleep_edit,
             self.seed_spin,
-            self.save_epochs_check,
             self.separate_screen_check,
             self.notes_edit,
         ]
@@ -2654,7 +3465,7 @@ class MIDataCollectorWindow(QMainWindow):
 
     def _phase_texts(self, phase: str, class_name: str | None) -> tuple[str, str]:
         if phase == "idle":
-            return "等待开始", "连接设备后先观察原始波形并确认稳定，再点击“开始采集”。"
+            return "等待开始", "连接设备后先观察原始波形并确认稳定，再选择“开始完整流程”或“直接进入 MI 主任务”。"
         if phase == "quality_check":
             return "质量检查", "观察 30-45 秒原始波形，确认无掉线、坏道、饱和和异常漂移。"
         if phase == "calibration_open":
@@ -2734,9 +3545,9 @@ class MIDataCollectorWindow(QMainWindow):
         if self.current_phase == "practice":
             return ("训练", "想象训练", "想象真实发力和关节感觉，不要做真实动作。", None)
         if self.current_phase == "baseline":
-            return ("静息", "静息", "请注视中央标记，保持放松与稳定。", None)
+            return ("准备", "准备阶段", "请注视中央标记，保持放松与稳定。", None)
         if self.current_phase == "iti":
-            return ("静息", "静息", "请放空当前想象，等待下一个试次。", None)
+            return ("休息", "休息恢复", "请放空当前想象，等待下一个试次。", None)
         if self.current_phase == "run_rest":
             return ("休息", "轮次间休息", "请放松并保持注意，稍后继续。", None)
         if self.current_phase == "idle_block":
@@ -2852,17 +3663,147 @@ class MIDataCollectorWindow(QMainWindow):
             return max(1, int(len(self.preview_widget.channel_names)))
         return max(1, len(DEFAULT_CHANNEL_NAMES))
 
+    def _refresh_preview_toggle_button_styles(self) -> None:
+        preview_focus = self._preview_focus_active()
+        padding_v = 3 if preview_focus else 6
+        padding_h = 9 if preview_focus else 12
+        radius = 11 if preview_focus else 12
+
+        target_mode = None
+        if self.preview_mode_switch_pending and self.preview_mode_switch_target is not None:
+            target_mode = str(self.preview_mode_switch_target.get("mode", RealtimeEEGPreviewWidget.MODE_EEG))
+        current_mode = str(target_mode or self.preview_mode)
+
+        schemes = {
+            RealtimeEEGPreviewWidget.MODE_EEG: {
+                "active_bg": "#2563EB",
+                "active_border": "#1D4ED8",
+                "active_fg": "#FFFFFF",
+                "idle_bg": "#EFF6FF",
+                "idle_border": "#93C5FD",
+                "idle_fg": "#1D4ED8",
+                "hover_bg": "#DBEAFE",
+            },
+            RealtimeEEGPreviewWidget.MODE_IMPEDANCE: {
+                "active_bg": "#D97706",
+                "active_border": "#B45309",
+                "active_fg": "#FFFFFF",
+                "idle_bg": "#FFF7ED",
+                "idle_border": "#FBBF24",
+                "idle_fg": "#B45309",
+                "hover_bg": "#FFEDD5",
+            },
+        }
+
+        for button, mode in (
+            (self.preview_to_eeg_button, RealtimeEEGPreviewWidget.MODE_EEG),
+            (self.preview_to_imp_button, RealtimeEEGPreviewWidget.MODE_IMPEDANCE),
+        ):
+            if button is None:
+                continue
+            scheme = schemes[mode]
+            is_active = self.device_info is not None and current_mode == mode
+            if not button.isEnabled():
+                if is_active:
+                    background = scheme["idle_bg"]
+                    border = scheme["idle_border"]
+                    foreground = scheme["idle_fg"]
+                else:
+                    background = "#E2E8F0"
+                    border = "#CBD5E1"
+                    foreground = "#94A3B8"
+                hover = background
+            elif is_active:
+                background = scheme["active_bg"]
+                border = scheme["active_border"]
+                foreground = scheme["active_fg"]
+                hover = scheme["active_border"]
+            else:
+                background = scheme["idle_bg"]
+                border = scheme["idle_border"]
+                foreground = scheme["idle_fg"]
+                hover = scheme["hover_bg"]
+            button.setStyleSheet(
+                "QPushButton { "
+                f"background: {background}; color: {foreground}; border: 1px solid {border}; "
+                f"border-radius: {radius}px; padding: {padding_v}px {padding_h}px; "
+                "font-weight: 700; } "
+                f"QPushButton:hover {{ background: {hover}; }} "
+                f"QPushButton:pressed {{ background: {border}; }} "
+                "QPushButton:disabled { opacity: 1; }"
+            )
+
+    def _apply_preview_mode_label_display(self) -> None:
+        if self.preview_mode_label is None:
+            return
+
+        preview_focus = self._preview_focus_active()
+        focus_compact = preview_focus and (
+            (self.preview_group.width() if self.preview_group is not None else self.width()) < 760
+        )
+        if self.preview_mode_switch_pending and self.preview_mode_switch_target is not None:
+            target_mode = str(self.preview_mode_switch_target.get("mode", RealtimeEEGPreviewWidget.MODE_EEG))
+            label_text = "切换中：8通道阻抗" if target_mode == RealtimeEEGPreviewWidget.MODE_IMPEDANCE else "切换中：EEG预览"
+            tooltip_text = "质量检查：正在切换到 8 通道阻抗模式" if target_mode == RealtimeEEGPreviewWidget.MODE_IMPEDANCE else "质量检查：正在切换到 EEG 预览"
+            tone = "switch"
+        elif self.device_info is None:
+            label_text = "等待连接"
+            tooltip_text = "质量检查：等待设备连接"
+            tone = "idle"
+        elif self.preview_mode == RealtimeEEGPreviewWidget.MODE_IMPEDANCE:
+            label_text = "8通道阻抗"
+            tooltip_text = "质量检查模式：8 通道阻抗，显示原始波形并同步估计每条通道的接触阻抗。"
+            tone = "impedance"
+        else:
+            label_text = "EEG 8通道波形"
+            tooltip_text = "质量检查模式：EEG 预览仅对显示做轻量预处理，保存仍保持原始采集数据。"
+            tone = "eeg"
+
+        display_text = tooltip_text if not preview_focus else label_text
+        tone_styles = {
+            "idle": "color: #334155; background: #E2E8F0; border: 1px solid #CBD5E1;",
+            "switch": "color: #312E81; background: #E0E7FF; border: 1px solid #C7D2FE;",
+            "eeg": "color: #1D4ED8; background: #DBEAFE; border: 1px solid #93C5FD;",
+            "impedance": "color: #92400E; background: #FEF3C7; border: 1px solid #FCD34D;",
+        }
+        self.preview_mode_label.setText(display_text)
+        self.preview_mode_label.setToolTip(tooltip_text)
+        self.preview_mode_label.setStyleSheet(
+            f"{tone_styles[tone]} font-weight: 700; border-radius: 12px; padding: 6px 10px;"
+        )
+        self._refresh_preview_toggle_button_styles()
+
+    def _compose_preview_status_text(self) -> str:
+        suggested_seconds = 0.0 if not hasattr(self, "quality_check_spin") else float(self.quality_check_spin.value())
+        if self.preview_mode_switch_pending and self.preview_mode_switch_target is not None:
+            target_mode = str(self.preview_mode_switch_target.get("mode", RealtimeEEGPreviewWidget.MODE_EEG))
+            if target_mode == RealtimeEEGPreviewWidget.MODE_IMPEDANCE:
+                return "正在切换到 8 通道阻抗质量检查模式。切换完成后会同时显示 8 条通道的原始波形和阻抗估计。"
+            return "正在切换回 EEG 预览模式并恢复默认板卡设置。完成后可直接开始正式采集。"
+
+        if self.preview_mode == RealtimeEEGPreviewWidget.MODE_IMPEDANCE:
+            mode_hint = "当前模式：8 通道阻抗模式，显示原始波形并同步估计每条通道的接触阻抗。"
+        else:
+            mode_hint = "当前模式：EEG 模式，仅对显示做轻量预处理；实际保存的数据始终保持原始采集值。"
+
+        if self.device_info is None:
+            return (
+                f"连接设备后开始质量检查。建议先观察约 {suggested_seconds:.0f} 秒，确认无掉线、坏道、饱和、异常漂移和接触不良。"
+                f"{mode_hint}"
+            )
+        if self.current_phase == "quality_check":
+            return f"质量检查中：请观察波形稳定性、通道状态和接触质量。{mode_hint}"
+        if self.session_running:
+            return f"正式采集中：当前面板仅用于辅助监看。{mode_hint}"
+        return (
+            f"设备已连接：当前已切换到质量检查优先视图。建议先观察约 {suggested_seconds:.0f} 秒，确认 8 通道稳定、"
+            f"无掉线/饱和/漂移后，再开始正式采集。{mode_hint}"
+        )
+
     def _set_preview_mode_label(self) -> None:
         if self.preview_mode_label is None:
             return
-        if self.device_info is None:
-            self.preview_mode_label.setText("质量检查模式：等待设备连接")
-            self._refresh_preview_text_heights()
-            return
-        if self.preview_mode == RealtimeEEGPreviewWidget.MODE_IMPEDANCE:
-            self.preview_mode_label.setText(f"质量检查模式：阻抗（CH{self.preview_impedance_channel}）")
-        else:
-            self.preview_mode_label.setText("质量检查模式：EEG（FBCCA 风格仅显示预处理；保存保持原始）")
+        self._apply_preview_mode_label_display()
         self._refresh_preview_text_heights()
 
     def _apply_preview_mode_locally(self, mode: str, *, channel: int | None = None) -> None:
@@ -2877,9 +3818,17 @@ class MIDataCollectorWindow(QMainWindow):
         self.preview_mode = normalized
         self.preview_impedance_channel = target_channel
         if self.preview_widget is not None:
-            self.preview_widget.set_quality_mode(normalized, impedance_channel=target_channel)
+            self.preview_widget.set_quality_mode(normalized)
         self._set_preview_mode_label()
         self._update_preview_status()
+
+    def _log_preview_mode_switch(self, mode: str, *, channel: int, reset_default: bool) -> None:
+        if mode == RealtimeEEGPreviewWidget.MODE_IMPEDANCE:
+            self.log("质量检查模式 -> 8通道阻抗")
+        elif bool(reset_default):
+            self.log("质量检查模式 -> EEG（恢复默认设置）")
+        else:
+            self.log("质量检查模式 -> EEG")
 
     def _switch_preview_mode(
         self,
@@ -2901,71 +3850,68 @@ class MIDataCollectorWindow(QMainWindow):
 
         if self.worker is None or self.device_info is None:
             self._apply_preview_mode_locally(normalized, channel=target_channel)
-            return False
+            return True
 
-        ok, message = self.worker.switch_quality_mode_sync(
-            target_mode=normalized,
-            target_channel=target_channel,
-            reset_default=bool(reset_default),
-        )
-        if not ok:
+        if normalized == self.preview_mode and target_channel == self.preview_impedance_channel and not bool(reset_default):
+            self._apply_preview_mode_locally(normalized, channel=target_channel)
+            return True
+
+        if normalized == RealtimeEEGPreviewWidget.MODE_IMPEDANCE and not self.worker.supports_impedance_mode():
+            message = "当前阻抗模式仅支持 Cyton / Cyton Daisy 板卡。"
             if show_error_dialog:
                 self.show_error(message)
             else:
                 self.log(message)
             return False
 
-        self._apply_preview_mode_locally(normalized, channel=target_channel)
-        if write_log:
-            if normalized == RealtimeEEGPreviewWidget.MODE_IMPEDANCE:
-                self.log(f"质量检查模式 -> 阻抗模式（CH{target_channel}）")
-            elif bool(reset_default):
-                self.log("质量检查模式 -> EEG（已恢复默认设置）")
-            else:
-                self.log("质量检查模式 -> EEG")
+        if self.preview_mode_switch_pending:
+            return False
+
+        self.preview_mode_switch_pending = True
+        self.preview_mode_switch_target = {
+            "mode": normalized,
+            "channel": int(target_channel),
+            "reset_default": bool(reset_default),
+            "show_error_dialog": bool(show_error_dialog),
+            "write_log": bool(write_log),
+        }
+        self._set_preview_mode_label()
+        self._update_preview_status()
+        self.update_button_states()
+        self.preview_mode_switch_requested.emit(normalized, int(target_channel), bool(reset_default))
         return True
 
     def on_preview_to_eeg_clicked(self) -> None:
         self._switch_preview_mode(RealtimeEEGPreviewWidget.MODE_EEG, channel=self.preview_impedance_channel)
-        self.update_button_states()
 
     def on_preview_to_imp_clicked(self) -> None:
         self._switch_preview_mode(RealtimeEEGPreviewWidget.MODE_IMPEDANCE, channel=self.preview_impedance_channel)
-        self.update_button_states()
 
     def on_preview_prev_channel_clicked(self) -> None:
         channel_count = self._preview_channel_count()
-        self.preview_impedance_channel -= 1
-        if self.preview_impedance_channel < 1:
-            self.preview_impedance_channel = channel_count
+        target_channel = self.preview_impedance_channel - 1
+        if target_channel < 1:
+            target_channel = channel_count
         if self.preview_mode == RealtimeEEGPreviewWidget.MODE_IMPEDANCE:
-            switched = self._switch_preview_mode(
+            self._switch_preview_mode(
                 RealtimeEEGPreviewWidget.MODE_IMPEDANCE,
-                channel=self.preview_impedance_channel,
-                write_log=False,
+                channel=target_channel,
             )
-            if switched:
-                self.log(f"阻抗检测通道 -> CH{self.preview_impedance_channel}")
         else:
-            self._apply_preview_mode_locally(self.preview_mode, channel=self.preview_impedance_channel)
-        self.update_button_states()
+            self._apply_preview_mode_locally(self.preview_mode, channel=target_channel)
 
     def on_preview_next_channel_clicked(self) -> None:
         channel_count = self._preview_channel_count()
-        self.preview_impedance_channel += 1
-        if self.preview_impedance_channel > channel_count:
-            self.preview_impedance_channel = 1
+        target_channel = self.preview_impedance_channel + 1
+        if target_channel > channel_count:
+            target_channel = 1
         if self.preview_mode == RealtimeEEGPreviewWidget.MODE_IMPEDANCE:
-            switched = self._switch_preview_mode(
+            self._switch_preview_mode(
                 RealtimeEEGPreviewWidget.MODE_IMPEDANCE,
-                channel=self.preview_impedance_channel,
-                write_log=False,
+                channel=target_channel,
             )
-            if switched:
-                self.log(f"阻抗检测通道 -> CH{self.preview_impedance_channel}")
         else:
-            self._apply_preview_mode_locally(self.preview_mode, channel=self.preview_impedance_channel)
-        self.update_button_states()
+            self._apply_preview_mode_locally(self.preview_mode, channel=target_channel)
 
     def on_preview_reset_clicked(self) -> None:
         self._switch_preview_mode(
@@ -2973,62 +3919,64 @@ class MIDataCollectorWindow(QMainWindow):
             channel=self.preview_impedance_channel,
             reset_default=True,
         )
+
+    @pyqtSlot(object)
+    def on_preview_mode_switch_finished(self, payload: object) -> None:
+        payload_dict = dict(payload) if isinstance(payload, dict) else {}
+        request = dict(self.preview_mode_switch_target or {})
+        self.preview_mode_switch_pending = False
+        self.preview_mode_switch_target = None
+
+        ok = bool(payload_dict.get("ok"))
+        target_mode = str(payload_dict.get("target_mode", request.get("mode", self.preview_mode)))
+        target_channel = int(payload_dict.get("target_channel", request.get("channel", self.preview_impedance_channel)))
+        reset_default = bool(payload_dict.get("reset_default", request.get("reset_default", False)))
+        message = str(payload_dict.get("message", "")).strip()
+        show_error_dialog = bool(request.get("show_error_dialog", True))
+        write_log = bool(request.get("write_log", True))
+
+        if ok:
+            self._apply_preview_mode_locally(target_mode, channel=target_channel)
+            if write_log and (self.worker is None or self.device_info is None):
+                self._log_preview_mode_switch(target_mode, channel=target_channel, reset_default=reset_default)
+            pending_session_start = self.pending_session_start_context
+            self.pending_session_start_context = None
+            if pending_session_start is not None:
+                settings, sequence_by_run = pending_session_start
+                self._begin_session_with_settings(settings, sequence_by_run)
+                return
+        else:
+            self.pending_session_start_context = None
+            if not message:
+                message = "切换质量检查模式失败。"
+            if show_error_dialog:
+                self.show_error(message)
+            else:
+                self.log(message)
+
+        self._set_preview_mode_label()
+        self._update_preview_status()
         self.update_button_states()
 
     def _update_preview_status(self) -> None:
         if self.preview_status_label is None:
             return
-
-        suggested_seconds = 0.0 if not hasattr(self, "quality_check_spin") else float(self.quality_check_spin.value())
-        if self.preview_mode == RealtimeEEGPreviewWidget.MODE_IMPEDANCE:
-            mode_hint = f"当前模式：阻抗模式（CH{self.preview_impedance_channel}），显示原始波形，便于直接判断接触质量。"
-        else:
-            mode_hint = (
-                "当前模式：EEG 模式，仅用于显示的预处理为：(raw - 3Hz 低通基线) + 50Hz 陷波 + 去均值；"
-                "实际保存的数据始终保持原始采集值。"
-            )
-
-        if self.device_info is None:
-            self.preview_status_label.setText(
-                f"连接设备后开始质量检查。建议先观察约 {suggested_seconds:.0f} 秒，确认无掉线、坏道、饱和、异常漂移和接触不良。{mode_hint}"
-            )
-            self._set_preview_mode_label()
-            self._refresh_preview_text_heights()
-            return
-
-        if self.current_phase == "quality_check":
-            self.preview_status_label.setText(
-                f"质量检查中：请观察波形稳定性、通道状态和接触质量。{mode_hint}"
-            )
-            self._set_preview_mode_label()
-            self._refresh_preview_text_heights()
-            return
-
-        if self.session_running:
-            self.preview_status_label.setText(
-                f"正式采集中：当前面板仅用于辅助监看。{mode_hint}"
-            )
-            self._set_preview_mode_label()
-            self._refresh_preview_text_heights()
-            return
-
-        self.preview_status_label.setText(
-            f"设备已连接：建议先完成约 {suggested_seconds:.0f} 秒的连接质量检查，再开始正式采集。{mode_hint}"
-        )
-        self._set_preview_mode_label()
+        self.preview_status_label.setText(self._compose_preview_status_text())
+        self._apply_preview_mode_label_display()
         self._refresh_preview_text_heights()
 
     def _start_formal_protocol(self) -> None:
-        self.record_event("calibration_start")
-        if self.marker_failure_active:
-            return
-        self._start_next_calibration_step()
-        if self.marker_failure_active:
-            return
         if self.use_separate_participant_screen:
             self.show_participant_display()
         else:
             self.participant_window.hide()
+        if self.calibration_plan:
+            self.record_event("calibration_start")
+            if self.marker_failure_active:
+                return
+            self._start_next_calibration_step()
+            return
+        self._start_post_calibration_sequence()
 
     def _update_trial_meta_labels(self) -> None:
         total = len(self.sequence)
@@ -3065,7 +4013,17 @@ class MIDataCollectorWindow(QMainWindow):
         if not self.current_trial.note:
             self.current_trial.note = "当前会话手动提前结束"
 
-    def _event_already_recorded(self, event_name: str, *, trial_id: int | None, class_name: str | None) -> bool:
+    def _event_already_recorded(
+        self,
+        event_name: str,
+        *,
+        trial_id: int | None,
+        class_name: str | None,
+        run_index: int | None = None,
+        run_trial_index: int | None = None,
+        block_index: int | None = None,
+        prompt_index: int | None = None,
+    ) -> bool:
         for event in reversed(self.event_log):
             if str(event.get("event_name", "")) != str(event_name):
                 continue
@@ -3073,8 +4031,51 @@ class MIDataCollectorWindow(QMainWindow):
                 continue
             if class_name is not None and str(event.get("class_name", "")) != str(class_name):
                 continue
+            if run_index is not None and int(event.get("run_index", -1)) != int(run_index):
+                continue
+            if run_trial_index is not None and int(event.get("run_trial_index", -1)) != int(run_trial_index):
+                continue
+            if block_index is not None and int(event.get("block_index", -1)) != int(block_index):
+                continue
+            if prompt_index is not None and int(event.get("prompt_index", -1)) != int(prompt_index):
+                continue
             return True
         return False
+
+    def _record_event_once(
+        self,
+        event_name: str,
+        *,
+        trial_id: int | None = None,
+        class_name: str | None = None,
+        run_index: int | None = None,
+        run_trial_index: int | None = None,
+        block_index: int | None = None,
+        prompt_index: int | None = None,
+        command_duration_sec: float | None = None,
+        execution_success: int | bool | None = None,
+    ) -> None:
+        if self._event_already_recorded(
+            event_name,
+            trial_id=trial_id,
+            class_name=class_name,
+            run_index=run_index,
+            run_trial_index=run_trial_index,
+            block_index=block_index,
+            prompt_index=prompt_index,
+        ):
+            return
+        self.record_event(
+            event_name,
+            trial_id=trial_id,
+            class_name=class_name,
+            run_index=run_index,
+            run_trial_index=run_trial_index,
+            block_index=block_index,
+            prompt_index=prompt_index,
+            command_duration_sec=command_duration_sec,
+            execution_success=execution_success,
+        )
 
     def connect_device(self) -> None:
         if self.worker_thread is not None:
@@ -3106,11 +4107,13 @@ class MIDataCollectorWindow(QMainWindow):
         self.worker.status_changed.connect(self.on_worker_status)
         self.worker.error_occurred.connect(self.on_worker_error)
         self.worker.session_data_ready.connect(self.on_session_data_ready)
+        self.worker.quality_mode_switch_finished.connect(self.on_preview_mode_switch_finished)
         self.worker.finished.connect(self.worker_thread.quit)
         self.worker.finished.connect(self.worker.deleteLater)
         self.worker_thread.finished.connect(self.on_worker_thread_finished)
         self.worker_thread.finished.connect(self.worker_thread.deleteLater)
         self.worker_stop_requested.connect(self.worker.request_stop, Qt.DirectConnection)
+        self.preview_mode_switch_requested.connect(self.worker.request_quality_mode_switch, Qt.DirectConnection)
 
         self.update_button_states()
         self.set_config_enabled(False)
@@ -3118,6 +4121,9 @@ class MIDataCollectorWindow(QMainWindow):
 
     def on_connection_ready(self, info: dict) -> None:
         self.device_info = dict(info)
+        self.preview_mode_switch_pending = False
+        self.preview_mode_switch_target = None
+        self.pending_session_start_context = None
         sampling_rate = float(info.get("sampling_rate", 0.0))
         channel_names = [str(item) for item in info.get("channel_names", [])]
         self.device_label.setText(
@@ -3130,14 +4136,6 @@ class MIDataCollectorWindow(QMainWindow):
         if self.preview_widget is not None:
             self.preview_widget.configure_stream(sampling_rate=sampling_rate, channel_names=channel_names)
             self.preview_widget.set_quality_mode(self.preview_mode, impedance_channel=self.preview_impedance_channel)
-        if self.worker is not None and self.worker.supports_impedance_mode():
-            ok, message = self.worker.switch_quality_mode_sync(
-                target_mode=RealtimeEEGPreviewWidget.MODE_EEG,
-                target_channel=self.preview_impedance_channel,
-                reset_default=True,
-            )
-            if not ok:
-                self.log(message)
         self._set_preview_mode_label()
         self._update_preview_status()
         self._update_trial_meta_labels()
@@ -3158,9 +4156,11 @@ class MIDataCollectorWindow(QMainWindow):
     def update_button_states(self) -> None:
         connected = self.device_info is not None
         busy_connecting = self.worker_thread is not None and self.device_info is None and not self.waiting_for_save
+        preview_switch_busy = self.preview_mode_switch_pending
 
-        self.connect_button.setEnabled(not connected and not busy_connecting and not self.waiting_for_save)
-        self.start_button.setEnabled(connected and not self.session_running and not self.waiting_for_save)
+        self.connect_button.setEnabled(not connected and not busy_connecting and not self.waiting_for_save and not preview_switch_busy)
+        self.start_button.setEnabled(connected and not self.session_running and not self.waiting_for_save and not preview_switch_busy)
+        self.start_mi_only_button.setEnabled(connected and not self.session_running and not self.waiting_for_save and not preview_switch_busy)
         self.pause_button.setEnabled(self.session_running and not self.waiting_for_save)
         self.pause_button.setText("继续" if self.session_paused else "暂停")
         if self.current_phase == "continuous":
@@ -3176,25 +4176,31 @@ class MIDataCollectorWindow(QMainWindow):
             )
         )
         self.stop_button.setEnabled(self.session_running and self.worker_thread is not None and not self.waiting_for_save)
-        self.disconnect_button.setEnabled(connected and not self.session_running and not self.waiting_for_save)
+        self.disconnect_button.setEnabled(
+            connected and not self.session_running and not self.waiting_for_save and not preview_switch_busy
+        )
+        self._apply_control_button_visibility()
 
-        preview_controls_enabled = connected and not self.session_running and not self.waiting_for_save
+        preview_controls_enabled = connected and not self.session_running and not self.waiting_for_save and not preview_switch_busy
         supports_impedance = self.worker is not None and self.worker.supports_impedance_mode()
-        channel_step_enabled = preview_controls_enabled and supports_impedance and self._preview_channel_count() > 1
         if self.preview_to_eeg_button is not None:
             self.preview_to_eeg_button.setEnabled(preview_controls_enabled)
         if self.preview_to_imp_button is not None:
             self.preview_to_imp_button.setEnabled(preview_controls_enabled and supports_impedance)
         if self.preview_prev_ch_button is not None:
-            self.preview_prev_ch_button.setEnabled(channel_step_enabled)
+            self.preview_prev_ch_button.setEnabled(False)
+            self.preview_prev_ch_button.hide()
         if self.preview_next_ch_button is not None:
-            self.preview_next_ch_button.setEnabled(channel_step_enabled)
+            self.preview_next_ch_button.setEnabled(False)
+            self.preview_next_ch_button.hide()
         if self.preview_reset_button is not None:
-            self.preview_reset_button.setEnabled(preview_controls_enabled and supports_impedance)
+            self.preview_reset_button.setEnabled(False)
+            self.preview_reset_button.hide()
         self._set_preview_mode_label()
 
         editable = self.worker_thread is None and not self.waiting_for_save
         self.set_config_enabled(editable)
+        self._update_responsive_chrome()
 
     def _build_calibration_plan(self, settings: SessionSettings) -> list[dict[str, object]]:
         plan: list[dict[str, object]] = []
@@ -3263,6 +4269,77 @@ class MIDataCollectorWindow(QMainWindow):
 
         threading.Thread(target=_play, daemon=True).start()
 
+    def _stop_voice_prompt(self) -> None:
+        with self.voice_prompt_lock:
+            process = self.voice_prompt_process
+            self.voice_prompt_process = None
+        if process is None or process.poll() is not None:
+            return
+        try:
+            process.terminate()
+        except Exception:
+            pass
+
+    def _speak_windows_prompt(self, text: str) -> None:
+        safe_text = str(text).strip()
+        if not safe_text:
+            return
+        if not sys.platform.startswith("win"):
+            return
+
+        self._stop_voice_prompt()
+        quoted_text = safe_text.replace("'", "''")
+        script = (
+            "Add-Type -AssemblyName System.Speech\n"
+            "$synth = New-Object System.Speech.Synthesis.SpeechSynthesizer\n"
+            "try {\n"
+            "    $synth.Volume = 100\n"
+            "    $synth.Rate = 0\n"
+            f"    $synth.Speak('{quoted_text}')\n"
+            "} finally {\n"
+            "    $synth.Dispose()\n"
+            "}\n"
+        )
+        encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
+        command = [
+            "powershell.exe",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-EncodedCommand",
+            encoded,
+        ]
+
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        process: subprocess.Popen | None = None
+        try:
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=creationflags,
+            )
+            with self.voice_prompt_lock:
+                self.voice_prompt_process = process
+            process.wait(timeout=8.0)
+        except Exception:
+            if process is not None:
+                try:
+                    process.terminate()
+                except Exception:
+                    pass
+        finally:
+            with self.voice_prompt_lock:
+                if self.voice_prompt_process is process:
+                    self.voice_prompt_process = None
+
+    def _speak_cue_prompt(self, class_name: str | None) -> None:
+        prompt = CUE_VOICE_PROMPTS.get(str(class_name or ""))
+        if not prompt:
+            return
+        threading.Thread(target=self._speak_windows_prompt, args=(prompt,), daemon=True).start()
+
     def _maybe_start_scheduled_continuous(self) -> bool:
         if self.current_settings is None:
             return False
@@ -3275,6 +4352,24 @@ class MIDataCollectorWindow(QMainWindow):
         self.start_continuous_block()
         return True
 
+    def _start_post_calibration_sequence(self) -> None:
+        if self.current_settings is None:
+            return
+        if self.current_settings.practice_sec > 0:
+            self.record_event("practice_start")
+            if self.marker_failure_active:
+                return
+            self.enter_phase(
+                phase="practice",
+                duration_sec=self.current_settings.practice_sec,
+                class_name=None,
+                title="",
+                subtitle="",
+            )
+            self.current_label.setText("当前任务：想象训练")
+            return
+        self._start_next_mi_run()
+
     def _start_next_calibration_step(self) -> None:
         if self.current_settings is None:
             return
@@ -3283,20 +4378,7 @@ class MIDataCollectorWindow(QMainWindow):
             self.record_event("calibration_end")
             if self.marker_failure_active:
                 return
-            if self.current_settings.practice_sec > 0:
-                self.record_event("practice_start")
-                if self.marker_failure_active:
-                    return
-                self.enter_phase(
-                    phase="practice",
-                    duration_sec=self.current_settings.practice_sec,
-                    class_name=None,
-                    title="",
-                    subtitle="",
-                )
-                self.current_label.setText("当前任务：想象训练")
-            else:
-                self._start_next_mi_run()
+            self._start_post_calibration_sequence()
             return
 
         step = self.calibration_plan[self.calibration_step_index]
@@ -3538,45 +4620,11 @@ class MIDataCollectorWindow(QMainWindow):
             return
         self.finish_session_and_request_save(manual_stop=False)
 
-    def start_session(self) -> None:
-        if self.device_info is None or self.worker is None:
-            self.show_error("请先连接设备。")
-            return
-        if self.session_running or self.waiting_for_save:
-            self.show_error("当前已有采集任务在运行或正在保存。")
-            return
-        if self.worker.supports_impedance_mode():
-            switched = self._switch_preview_mode(
-                RealtimeEEGPreviewWidget.MODE_EEG,
-                channel=self.preview_impedance_channel,
-                reset_default=True,
-                show_error_dialog=True,
-                write_log=False,
-            )
-            if not switched:
-                return
-
-        # Always use a fresh seed per session and persist it in settings/metadata.
-        self.seed_spin.setValue(self._generate_session_seed())
-
-        try:
-            settings = self.collect_settings()
-            sequence_by_run = [
-                build_balanced_trial_sequence(
-                    settings.trials_per_class,
-                    settings.random_seed + run_offset,
-                    settings.max_consecutive_same_class,
-                )
-                for run_offset in range(int(settings.run_count))
-            ]
-        except Exception as error:
-            self.show_error(str(error))
-            return
-
-        if len(settings.channel_names) != len(self.device_info.get("selected_rows", [])):
-            self.show_error("通道名称数量与连接时的通道数量不一致。请断开设备后重新连接。")
-            return
-
+    def _begin_session_with_settings(
+        self,
+        settings: SessionSettings,
+        sequence_by_run: list[list[str]],
+    ) -> None:
         self.current_settings = settings
         self.use_separate_participant_screen = bool(self.separate_screen_check.isChecked())
         self.sequence_by_run = sequence_by_run
@@ -3616,6 +4664,7 @@ class MIDataCollectorWindow(QMainWindow):
 
         self.summary_label.setText(f"状态：采集中，共 {len(self.sequence)} 个主任务试次")
         self.current_label.setText("当前任务：正在进入正式流程")
+        self.log(f"启动模式：{self._protocol_mode_label(settings.protocol_mode)}")
         self.log(
             f"开始采集：被试 {settings.subject_id} | 会话 {settings.session_id} | "
             f"轮次 {settings.run_count} | 每类 {settings.trials_per_class} 试次"
@@ -3630,6 +4679,62 @@ class MIDataCollectorWindow(QMainWindow):
             return
         self._start_formal_protocol()
         self.update_button_states()
+
+    def start_session(self) -> None:
+        self._start_session_with_protocol_mode(PROTOCOL_MODE_FULL)
+
+    def start_mi_only_session(self) -> None:
+        self._start_session_with_protocol_mode(PROTOCOL_MODE_MI_ONLY)
+
+    def _start_session_with_protocol_mode(self, protocol_mode: str) -> None:
+        if self.device_info is None or self.worker is None:
+            self.show_error("请先连接设备。")
+            return
+        if self.session_running or self.waiting_for_save:
+            self.show_error("当前已有采集任务在运行或正在保存。")
+            return
+        if self.preview_mode_switch_pending:
+            self.show_error("质量检查模式仍在切换中，请稍候再试。")
+            return
+
+        # Always use a fresh seed per session and persist it in settings/metadata.
+        self.seed_spin.setValue(self._generate_session_seed())
+
+        try:
+            settings = self.collect_settings()
+            if str(protocol_mode or PROTOCOL_MODE_FULL) != str(settings.protocol_mode):
+                settings = replace(settings, protocol_mode=str(protocol_mode or PROTOCOL_MODE_FULL))
+            settings = self._apply_protocol_mode_overrides(settings)
+            sequence_by_run = [
+                build_balanced_trial_sequence(
+                    settings.trials_per_class,
+                    settings.random_seed + run_offset,
+                    settings.max_consecutive_same_class,
+                )
+                for run_offset in range(int(settings.run_count))
+            ]
+        except Exception as error:
+            self.show_error(str(error))
+            return
+
+        if len(settings.channel_names) != len(self.device_info.get("selected_rows", [])):
+            self.show_error("通道名称数量与连接时的通道数量不一致。请断开设备后重新连接。")
+            return
+
+        if self.worker.supports_impedance_mode() and self.preview_mode != RealtimeEEGPreviewWidget.MODE_EEG:
+            self.pending_session_start_context = (settings, sequence_by_run)
+            switched = self._switch_preview_mode(
+                RealtimeEEGPreviewWidget.MODE_EEG,
+                channel=self.preview_impedance_channel,
+                reset_default=True,
+                show_error_dialog=True,
+                write_log=False,
+            )
+            if not switched:
+                self.pending_session_start_context = None
+            return
+
+        self._begin_session_with_settings(settings, sequence_by_run)
 
     def enter_phase(self, *, phase: str, duration_sec: float, class_name: str | None, title: str, subtitle: str) -> None:
         del title, subtitle
@@ -3758,6 +4863,7 @@ class MIDataCollectorWindow(QMainWindow):
                     title="",
                     subtitle="",
                 )
+                self._speak_cue_prompt(self.current_trial.class_name)
             return
 
         if self.current_phase == "cue":
@@ -4103,6 +5209,11 @@ class MIDataCollectorWindow(QMainWindow):
 
         self.sequence_label.setText("".join(parts))
 
+    def _request_worker_stop_after_flush(self) -> None:
+        if self.worker_thread is None or not self.waiting_for_save:
+            return
+        self.worker_stop_requested.emit()
+
     def finish_session_and_request_save(self, *, manual_stop: bool) -> None:
         if self.waiting_for_save or self.worker_thread is None:
             return
@@ -4113,26 +5224,26 @@ class MIDataCollectorWindow(QMainWindow):
 
         if self.session_running:
             if self.current_phase == "quality_check":
-                self.record_event("quality_check_end")
+                self._record_event_once("quality_check_end")
             elif self.current_phase.startswith("calibration_"):
                 if 0 <= self.calibration_step_index < len(self.calibration_plan):
                     step = self.calibration_plan[self.calibration_step_index]
-                    self.record_event(str(step["end_event"]))
-                self.record_event("calibration_end")
+                    self._record_event_once(str(step["end_event"]))
+                self._record_event_once("calibration_end")
             elif self.current_phase == "practice":
-                self.record_event("practice_end")
+                self._record_event_once("practice_end")
             elif self.current_phase == "run_rest":
-                self.record_event("run_rest_end", run_index=self.current_run_index)
+                self._record_event_once("run_rest_end", run_index=self.current_run_index)
             elif self.current_phase == "idle_block":
-                self.record_event("idle_block_end", block_index=self.idle_block_index)
+                self._record_event_once("idle_block_end", block_index=self.idle_block_index)
             elif self.current_phase == "idle_prepare":
-                self.record_event(
+                self._record_event_once(
                     "idle_prepare_end",
                     block_index=max(1, int(self.idle_prepare_block_index)),
                 )
             elif self.current_phase == "continuous":
                 self._close_current_continuous_prompt()
-                self.record_event("continuous_block_end", block_index=self.continuous_block_index)
+                self._record_event_once("continuous_block_end", block_index=self.continuous_block_index)
 
             if self.current_phase == "baseline" and self.current_trial is not None:
                 self._mark_incomplete_trial_if_needed()
@@ -4197,8 +5308,7 @@ class MIDataCollectorWindow(QMainWindow):
             )
             if self.current_run_index > 0 and not run_end_recorded:
                 self.record_event("mi_run_end", run_index=self.current_run_index)
-            if not self._event_already_recorded("session_end", trial_id=None, class_name=None):
-                self.record_event("session_end")
+            self._record_event_once("session_end")
             if self.marker_failure_active:
                 return
 
@@ -4234,10 +5344,10 @@ class MIDataCollectorWindow(QMainWindow):
         else:
             self.log("所有试次完成，开始保存当前会话。")
 
-        # Give BrainFlow a tiny buffer window so final markers (trial_end/session_end) are flushed.
-        time.sleep(0.08)
         self.update_button_states()
-        self.worker_stop_requested.emit()
+        # Give BrainFlow a tiny buffer window so final markers (trial_end/session_end) are
+        # flushed without blocking the UI thread.
+        QTimer.singleShot(80, self._request_worker_stop_after_flush)
 
     def stop_and_save(self) -> None:
         if self.waiting_for_save:
@@ -4273,6 +5383,9 @@ class MIDataCollectorWindow(QMainWindow):
     def disconnect_device(self) -> None:
         if self.waiting_for_save:
             self.show_error("当前正在保存数据，请等待保存完成。")
+            return
+        if self.preview_mode_switch_pending:
+            self.show_error("质量检查模式仍在切换中，请稍候再试。")
             return
         if self.session_running:
             self.show_error("当前正在采集，请先点击“停止并保存”。")
@@ -4388,7 +5501,7 @@ class MIDataCollectorWindow(QMainWindow):
         self.update_button_states()
 
     def _handle_missing_save_result(self) -> None:
-        if not self.waiting_for_save:
+        if not self.waiting_for_save or self.save_thread is not None:
             return
         self._set_save_failed_state("保存失败：设备线程已结束，但没有返回完整会话数据。本次会话未保存，请重新采集。")
 
@@ -4397,21 +5510,31 @@ class MIDataCollectorWindow(QMainWindow):
             self.log("设备停止，但没有需要保存的有效会话。")
             return
 
-        try:
-            result = save_mi_session(
-                brainflow_data=np.asarray(payload["brainflow_data"], dtype=np.float32),
-                sampling_rate=float(payload["sampling_rate"]),
-                eeg_rows=list(payload["selected_rows"]),
-                marker_row=int(payload["marker_row"]),
-                timestamp_row=None if payload["timestamp_row"] is None else int(payload["timestamp_row"]),
-                settings=self.current_settings,
-                event_log=list(self.event_log),
-                trial_records=list(self.trial_records),
-            )
-        except Exception as error:
-            self._set_save_failed_state(f"保存会话失败：{error}")
+        if self.save_thread is not None:
+            self._set_save_failed_state("保存失败：检测到重复的保存任务，请重新采集。")
             return
 
+        self.countdown_label.setText("正在后台写入采集数据，请等待保存完成…")
+        self.log("设备线程已返回完整数据，开始后台写盘。")
+
+        self.save_thread = QThread(self)
+        self.save_worker = SessionSaveWorker(
+            payload=dict(payload),
+            settings=self.current_settings,
+            event_log=list(self.event_log),
+            trial_records=list(self.trial_records),
+        )
+        self.save_worker.moveToThread(self.save_thread)
+        self.save_thread.started.connect(self.save_worker.run)
+        self.save_worker.save_completed.connect(self.on_session_save_completed)
+        self.save_worker.save_failed.connect(self._set_save_failed_state)
+        self.save_worker.finished.connect(self.save_thread.quit)
+        self.save_worker.finished.connect(self.save_worker.deleteLater)
+        self.save_thread.finished.connect(self.on_save_thread_finished)
+        self.save_thread.finished.connect(self.save_thread.deleteLater)
+        self.save_thread.start()
+
+    def on_session_save_completed(self, result: dict) -> None:
         self.waiting_for_save = False
         self.capture_on_stop = False
         self.summary_label.setText(f"状态：保存完成，共保存 {result['trial_count']} 个试次")
@@ -4429,11 +5552,13 @@ class MIDataCollectorWindow(QMainWindow):
         self.trial_banner_label.setText(f"当前试次：本次会话已完成，共 {result['trial_count']} 个试次")
         self.next_task_label.setText("下一任务：可以开始新的会话")
         self.log(f"会话已保存：{result['session_dir']}")
-        if "run_index" in result and "run_stem" in result:
-            self.log(f"采集编号：run-{int(result['run_index']):03d} | 标识：{result['run_stem']}")
+        if "save_index" in result and "run_stem" in result:
+            self.log(f"采集编号：save-{int(result['save_index']):03d} | 标识：{result['run_stem']}")
         self.log(f"原始数据：{result['fif_path']}")
-        if result.get("epochs_path"):
-            self.log(f"训练缓存：{result['epochs_path']}")
+        if result.get("board_data_path"):
+            self.log(f"Board matrix: {result['board_data_path']}")
+        if result.get("segments_csv_path"):
+            self.log(f"Segments CSV: {result['segments_csv_path']}")
         if result.get("mi_epochs_path"):
             self.log(f"主分类训练集：{result['mi_epochs_path']}")
         if result.get("gate_epochs_path"):
@@ -4451,11 +5576,16 @@ class MIDataCollectorWindow(QMainWindow):
             self.participant_window.hide()
         self.update_button_states()
 
+    def on_save_thread_finished(self) -> None:
+        self.save_worker = None
+        self.save_thread = None
+
     def on_worker_thread_finished(self) -> None:
         marker_failure_active = self.marker_failure_active
         saved_completed = self.current_label.text().startswith("当前任务：数据已保存到")
         save_failed = self.current_label.text().startswith("当前任务：保存失败")
         pending_save_result = self.waiting_for_save
+        self._stop_voice_prompt()
         self.worker = None
         self.worker_thread = None
         self.device_info = None
@@ -4482,6 +5612,9 @@ class MIDataCollectorWindow(QMainWindow):
         self.current_continuous_prompt = None
         self.preview_mode = RealtimeEEGPreviewWidget.MODE_EEG
         self.preview_impedance_channel = 1
+        self.preview_mode_switch_pending = False
+        self.preview_mode_switch_target = None
+        self.pending_session_start_context = None
         self.device_label.setText("设备：未连接")
         if self.preview_widget is not None:
             self.preview_widget.clear_stream("设备断开后停止实时波形显示。")
@@ -4503,7 +5636,7 @@ class MIDataCollectorWindow(QMainWindow):
         self._set_preview_mode_label()
         self._update_preview_status()
         self.update_button_states()
-        if pending_save_result:
+        if pending_save_result and self.save_thread is None:
             QTimer.singleShot(0, self._handle_missing_save_result)
 
     def closeEvent(self, event) -> None:  # noqa: N802
@@ -4518,6 +5651,7 @@ class MIDataCollectorWindow(QMainWindow):
             return
 
         if self.worker_thread is None:
+            self._stop_voice_prompt()
             self.participant_window.hide()
             event.accept()
             return
@@ -4534,6 +5668,7 @@ class MIDataCollectorWindow(QMainWindow):
             return
 
         self.capture_on_stop = False
+        self._stop_voice_prompt()
         self.participant_window.hide()
         self.worker_stop_requested.emit()
         if self.worker_thread is not None:

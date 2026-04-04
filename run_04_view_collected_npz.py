@@ -1,4 +1,4 @@
-"""Project root launcher: view collected epochs.npz (stats + waveforms)."""
+"""Project root launcher: view one collected MI run bundle."""
 
 from __future__ import annotations
 
@@ -38,4 +38,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

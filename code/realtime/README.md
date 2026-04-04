@@ -16,47 +16,38 @@ python run_03_realtime_infer.py
 python code/realtime/run_realtime_pycharm.py
 ```
 
-可选：8 通道实时波形监视（不做分类）：
+可选（仅看波形，不做分类）：
 
 ```powershell
 python run_05_channel_monitor.py
 ```
 
-如果终端里没有 `python` 命令，请改用：
-
-```powershell
-& 'C:\Users\P1233\miniconda3\envs\MI\python.exe' run_03_realtime_infer.py
-```
-
-说明：实时脚本没有命令行参数入口，主要通过 `mi_realtime_infer_only.py` 里的 `USER_CONFIG` 配置运行。
+运行配置主要来自 `code/realtime/mi_realtime_infer_only.py` 的 `USER_CONFIG`。
 
 ## 2. 模型加载顺序
 
-默认优先加载：
+默认优先：
 
 1. `code/realtime/models/custom_mi_realtime.joblib`
-2. 若不存在，回退到 `code/realtime/models/subject_1_mi.joblib`
+2. 若不存在，回退 `code/realtime/models/subject_1_mi.joblib`
 
-如果发生回退，界面会给出 warning，建议先完成自定义训练再进行实时评估。
+发生回退时，界面会弹 warning。
 
-## 3. 两种实时模式
+## 3. 实时模式
 
-在 `USER_CONFIG['realtime_mode']` 选择：
+`USER_CONFIG['realtime_mode']` 支持：
 
-- `continuous`：每次滑窗都输出，低证据时显示 `UNCERTAIN`
-- `guided`：按 `baseline -> cue -> imagery -> iti` 协议运行（测试协议，可调）
+- `continuous`（默认）：每个滑窗都输出，低证据显示 `UNCERTAIN`
+- `guided`：按协议 `baseline -> cue -> imagery -> iti`
 
-guided 默认时序（已与采集协议对齐）：
+guided 默认协议参数：
 
 - `protocol_baseline_sec=2.0`
-- `protocol_cue_sec=1.0`
+- `protocol_cue_sec=2.0`
 - `protocol_imagery_sec=4.0`
 - `protocol_iti_sec=2.0`
-
-说明：
-
-- guided 用于联调/对比，不是采集脚本本身
-- 若你改了 `protocol_*`，请把它视为“自定义测试协议”，不再等同于采集默认协议
+- `protocol_trials_per_class=4`
+- `protocol_random_seed=42`
 
 ## 4. 决策顺序
 
@@ -68,11 +59,20 @@ guided 默认时序（已与采集协议对齐）：
 4. 主 MI 分类
 5. 平滑、迟滞、释放逻辑
 
-## 5. 关键配置（`mi_realtime_infer_only.py`）
+常见显示状态：
+
+- `WARMING UP`
+- `BAD WINDOW/ARTIFACT`
+- `NO CONTROL`
+- `LEFT HAND / RIGHT HAND / FEET / TONGUE`
+- `UNCERTAIN`
+
+## 5. 关键配置
 
 常用项：
 
 - `model_path`
+- `window_model_paths`
 - `realtime_mode`
 - `step_sec`, `history_len`
 - `confidence_threshold`, `margin_threshold`
@@ -81,43 +81,34 @@ guided 默认时序（已与采集协议对齐）：
 - `use_artifact_recommended_gate_thresholds`
 - `board_id`, `serial_port`
 - `board_channel_positions`
-- guided 协议参数：`protocol_baseline_sec`, `protocol_cue_sec`, `protocol_imagery_sec`, `protocol_iti_sec`
 
-### 重要约束
+## 6. 板卡约束
 
 非 `SYNTHETIC_BOARD` 时：
 
 1. `serial_port` 不能为空
 2. 必须显式设置 `board_channel_positions`
 3. `board_channel_positions` 长度必须等于模型通道数
-4. 位置索引不能重复、不能为负
-
-## 6. 常见状态显示
-
-- `WARMING UP`
-- `BAD WINDOW/ARTIFACT`
-- `NO CONTROL`
-- `LEFT HAND / RIGHT HAND / FEET / TONGUE`
-- `UNCERTAIN`
+4. 位置索引不能重复，不能为负，不能超过板卡 EEG 行数
 
 ## 7. 常见问题
 
-### 7.1 启动时报 board_channel_positions 错误
+### 7.1 启动时报 `board_channel_positions` 错误
 
-按模型通道顺序设置显式索引，例如 8 通道可设为：
+先按训练通道顺序配置显式索引，例如：
 
 ```python
-"board_channel_positions": [0,1,2,3,4,5,6,7]
+"board_channel_positions": [0, 1, 2, 3, 4, 5, 6, 7]
 ```
 
-### 7.2 输出总是 UNCERTAIN
+### 7.2 输出长期 `UNCERTAIN`
 
-先检查：
+优先检查：
 
-1. 是否启用了推荐阈值
-2. 训练数据和实时通道顺序是否一致
-3. 实时信号质量是否频繁触发坏窗冻结
+1. 训练模型是否启用了推荐阈值
+2. 实时通道顺序是否与训练一致
+3. 是否频繁触发坏窗冻结
 
-### 7.3 一直显示 NO CONTROL
+### 7.3 总是 `NO CONTROL`
 
-通常是 gate 判定未通过。先看训练摘要里 gate 是否启用，以及推荐 gate 阈值是否过严。
+通常是 gate 未通过，先看训练摘要中 gate 是否启用、阈值是否过严。

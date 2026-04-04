@@ -117,7 +117,6 @@ RUN_FILE_SUFFIXES = {
     "_gate_epochs.npz": "gate",
     "_artifact_epochs.npz": "artifact",
     "_continuous.npz": "continuous",
-    "_epochs.npz": "legacy",
 }
 ARTIFACT_REJECTOR_CLASS_NAMES = ["clean", "artifact"]
 
@@ -147,7 +146,7 @@ def _parse_run_tokens_from_filename(path: Path) -> dict[str, object]:
     return {
         "subject_id": token["subject"],
         "session_id": token["session"],
-        "run_index": int(token["run"]),
+        "save_index": int(token["run"]),
         "trials_per_class": int(token["tpc"]),
         "total_trials_tag": int(token["n"]),
         "accepted_trials_tag": int(token["ok"]),
@@ -232,13 +231,13 @@ def default_artifact_candidate_names(candidate_names: list[str] | None = None) -
 
 
 def find_epoch_files(dataset_root: Path, subject_filter: str | None) -> list[Path]:
-    """Find all saved epoch npz files (new + legacy names)."""
+    """Find all saved MI epoch npz files."""
     if not dataset_root.exists():
         raise FileNotFoundError(f"Dataset root does not exist: {dataset_root}")
 
     candidates: list[Path] = []
     seen: set[Path] = set()
-    for pattern in ("*_epochs.npz", "epochs.npz"):
+    for pattern in ("*_mi_epochs.npz",):
         for path in dataset_root.rglob(pattern):
             resolved = path.resolve()
             if resolved in seen:
@@ -259,7 +258,7 @@ def find_epoch_files(dataset_root: Path, subject_filter: str | None) -> list[Pat
             )
         ]
     if not epoch_files:
-        raise FileNotFoundError(f"No trainable *_epochs.npz / epochs.npz files found under: {dataset_root}")
+        raise FileNotFoundError(f"No trainable *_mi_epochs.npz files found under: {dataset_root}")
     return epoch_files
 
 
@@ -275,24 +274,9 @@ def load_custom_epochs(dataset_root: Path, subject_filter: str | None = None) ->
 
     for path in epoch_files:
         file_token = _parse_run_tokens_from_filename(path)
-        with np.load(path, allow_pickle=True) as data:
-            X = np.asarray(data["X"], dtype=np.float32)
-            y = np.asarray(data["y"], dtype=np.int64)
-            X_baseline = (
-                np.asarray(data["X_baseline"], dtype=np.float32)
-                if "X_baseline" in data.files
-                else np.empty((0, X.shape[1], 0), dtype=np.float32)
-            )
-            X_iti = (
-                np.asarray(data["X_iti"], dtype=np.float32)
-                if "X_iti" in data.files
-                else np.empty((0, X.shape[1], 0), dtype=np.float32)
-            )
-            accepted = (
-                np.asarray(data["accepted"], dtype=np.int8)
-                if "accepted" in data.files
-                else np.ones(len(y), dtype=np.int8)
-            )
+        with np.load(path, allow_pickle=False) as data:
+            X = np.asarray(data["X_mi"], dtype=np.float32)
+            y = np.asarray(data["y_mi"], dtype=np.int64)
             current_channel_names = [_decode_npz_text(item) for item in data["channel_names"].tolist()]
             current_class_names = [_decode_npz_text(item) for item in data["class_names"].tolist()]
             current_sampling_rate = float(np.asarray(data["sampling_rate"]).reshape(-1)[0])
@@ -308,15 +292,15 @@ def load_custom_epochs(dataset_root: Path, subject_filter: str | None = None) ->
             if "session_id" in data.files:
                 session_id = _decode_npz_text(np.asarray(data["session_id"]).reshape(-1)[0]) or session_id
 
-            run_index = file_token.get("run_index")
-            if "run_index" in data.files:
-                run_index = int(np.asarray(data["run_index"]).reshape(-1)[0])
+            save_index = file_token.get("save_index")
+            if "save_index" in data.files:
+                save_index = int(np.asarray(data["save_index"]).reshape(-1)[0])
 
             run_stem = ""
             if "run_stem" in data.files:
                 run_stem = _decode_npz_text(np.asarray(data["run_stem"]).reshape(-1)[0])
             if not run_stem:
-                run_stem = path.stem.replace("_epochs", "")
+                run_stem = path.stem.replace("_mi_epochs", "")
 
             trials_per_class = file_token.get("trials_per_class")
             if "trials_per_class" in data.files:
@@ -331,35 +315,22 @@ def load_custom_epochs(dataset_root: Path, subject_filter: str | None = None) ->
                 accepted_trials_tag = int(np.asarray(data["accepted_trials"]).reshape(-1)[0])
 
             trial_ids = (
-                np.asarray(data["trial_ids"], dtype=np.int64)
-                if "trial_ids" in data.files
+                np.asarray(data["mi_trial_ids"], dtype=np.int64)
+                if "mi_trial_ids" in data.files
                 else np.arange(X.shape[0], dtype=np.int64)
-            )
-            baseline_trial_ids = (
-                np.asarray(data["baseline_trial_ids"], dtype=np.int64)
-                if "baseline_trial_ids" in data.files
-                else np.arange(X_baseline.shape[0], dtype=np.int64)
-            )
-            iti_trial_ids = (
-                np.asarray(data["iti_trial_ids"], dtype=np.int64)
-                if "iti_trial_ids" in data.files
-                else np.arange(X_iti.shape[0], dtype=np.int64)
             )
 
         if signal_unit in {"uv", "microvolt", "microvolts", "\u00b5v", "\u03bcv"}:
             X = (X * 1e-6).astype(np.float32)
-            X_baseline = (X_baseline * 1e-6).astype(np.float32)
-            X_iti = (X_iti * 1e-6).astype(np.float32)
 
         raw_trial_count = int(X.shape[0])
-        keep_mask = accepted.astype(bool)
-        accepted_trial_count = int(np.sum(keep_mask))
-        rejected_trial_count = int(raw_trial_count - accepted_trial_count)
+        accepted_trial_count = int(raw_trial_count)
+        rejected_trial_count = 0
         file_record = {
             "file": str(path.relative_to(dataset_root)),
             "subject_id": subject_id,
             "session_id": session_id,
-            "run_index": run_index,
+            "save_index": save_index,
             "run_stem": run_stem,
             "trials_per_class": trials_per_class,
             "total_trials_in_file": raw_trial_count,
@@ -368,23 +339,10 @@ def load_custom_epochs(dataset_root: Path, subject_filter: str | None = None) ->
             "total_trials_tag": total_trials_tag,
             "accepted_trials_tag": accepted_trials_tag,
             "sampling_rate_hz": current_sampling_rate,
-            "baseline_rest_segments_in_file": int(X_baseline.shape[0]),
-            "iti_rest_segments_in_file": int(X_iti.shape[0]),
+            "baseline_rest_segments_in_file": 0,
+            "iti_rest_segments_in_file": 0,
             "dropped_reason": "",
         }
-
-        if not np.any(keep_mask):
-            file_record["dropped_reason"] = "all_rejected"
-            source_records.append(file_record)
-            continue
-
-        X = X[keep_mask]
-        y = y[keep_mask]
-        trial_ids = trial_ids[keep_mask]
-        if X.size == 0:
-            file_record["dropped_reason"] = "empty_after_filter"
-            source_records.append(file_record)
-            continue
 
         if channel_names is None:
             channel_names = current_channel_names
@@ -421,13 +379,13 @@ def load_custom_epochs(dataset_root: Path, subject_filter: str | None = None) ->
                 "rest_payloads": [
                     {
                         "phase": "baseline",
-                        "X": np.asarray(X_baseline, dtype=np.float32),
-                        "trial_ids": np.asarray(baseline_trial_ids, dtype=np.int64),
+                        "X": np.empty((0, X.shape[1], X.shape[2]), dtype=np.float32),
+                        "trial_ids": np.empty((0,), dtype=np.int64),
                     },
                     {
                         "phase": "iti",
-                        "X": np.asarray(X_iti, dtype=np.float32),
-                        "trial_ids": np.asarray(iti_trial_ids, dtype=np.int64),
+                        "X": np.empty((0, X.shape[1], X.shape[2]), dtype=np.float32),
+                        "trial_ids": np.empty((0,), dtype=np.int64),
                     },
                 ],
                 "file_record": file_record,
@@ -523,8 +481,6 @@ def load_custom_epochs(dataset_root: Path, subject_filter: str | None = None) ->
 def _infer_npz_task_and_run_stem(path: Path) -> tuple[str | None, str]:
     """Infer task type and run stem from one npz file path."""
     name = path.name
-    if name == "epochs.npz":
-        return "legacy", ""
     for suffix, task in RUN_FILE_SUFFIXES.items():
         if name.endswith(suffix):
             return task, name[: -len(suffix)]
@@ -560,8 +516,7 @@ def find_run_npz_files(dataset_root: Path, subject_filter: str | None) -> list[d
     if not runs:
         raise FileNotFoundError(
             "No trainable data files were found. Expected at least one of: "
-            "*_mi_epochs.npz / *_gate_epochs.npz / *_artifact_epochs.npz / *_continuous.npz "
-            "(or legacy *_epochs.npz)."
+            "*_mi_epochs.npz / *_gate_epochs.npz / *_artifact_epochs.npz / *_continuous.npz."
         )
     return runs
 
@@ -571,6 +526,29 @@ def _load_npz_text(data: np.lib.npyio.NpzFile, key: str, default: str = "") -> s
     if key not in data.files:
         return default
     return _decode_npz_text(np.asarray(data[key]).reshape(-1)[0]) or default
+
+
+def _load_npz_int(data: np.lib.npyio.NpzFile, key: str, default: int = 0) -> int:
+    """Safely decode one scalar integer field from npz."""
+    if key not in data.files:
+        return int(default)
+    try:
+        return int(np.asarray(data[key]).reshape(-1)[0])
+    except Exception:
+        return int(default)
+
+
+def _load_derivative_sidecar(npz_path: Path) -> dict[str, object]:
+    """Load one optional derivative sidecar json file."""
+    candidate = npz_path.with_suffix(".meta.json")
+    if not candidate.exists() or not candidate.is_file():
+        return {}
+    try:
+        with candidate.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
 
 
 def _ensure_common_metadata(
@@ -667,7 +645,7 @@ def _keep_readable_npz(path: Path | None, *, label: str, run_issues: list[str]) 
         run_issues.append(f"{label}:stat_error:{type(error).__name__}")
         return None
     try:
-        with np.load(candidate, allow_pickle=True) as data:
+        with np.load(candidate, allow_pickle=False) as data:
             _ = tuple(data.files)
     except Exception as error:
         run_issues.append(f"{label}:load_error:{type(error).__name__}")
@@ -692,7 +670,7 @@ def load_custom_task_datasets(dataset_root: Path, subject_filter: str | None = N
     for entry in run_entries:
         run_stem = str(entry["run_stem"])
         paths = dict(entry["paths"])
-        mi_path = Path(paths.get("mi") or paths.get("legacy")) if (paths.get("mi") or paths.get("legacy")) else None
+        mi_path = Path(paths["mi"]) if "mi" in paths else None
         gate_path = Path(paths["gate"]) if "gate" in paths else None
         artifact_path = Path(paths["artifact"]) if "artifact" in paths else None
         continuous_path = Path(paths["continuous"]) if "continuous" in paths else None
@@ -708,7 +686,6 @@ def load_custom_task_datasets(dataset_root: Path, subject_filter: str | None = N
                     Path(item)
                     for item in (
                         paths.get("mi"),
-                        paths.get("legacy"),
                         paths.get("gate"),
                         paths.get("artifact"),
                         paths.get("continuous"),
@@ -724,13 +701,22 @@ def load_custom_task_datasets(dataset_root: Path, subject_filter: str | None = N
         token = _parse_run_tokens_from_filename(probe_path)
         subject_id = str(token.get("subject_id", ""))
         session_id = str(token.get("session_id", ""))
-        run_index = token.get("run_index")
+        save_index = token.get("save_index")
+        schema_version = 2
+        sidecar_probe_path = next((path for path in (mi_path, gate_path, artifact_path, continuous_path) if path is not None), None)
+        sidecar_probe = _load_derivative_sidecar(sidecar_probe_path) if sidecar_probe_path is not None else {}
+        if sidecar_probe.get("schema_version") is not None:
+            try:
+                schema_version = int(sidecar_probe.get("schema_version") or schema_version)
+            except Exception:
+                schema_version = 2
 
         file_record = {
             "run_stem": run_stem,
             "subject_id": subject_id,
             "session_id": session_id,
-            "run_index": run_index,
+            "save_index": save_index,
+            "schema_version": int(schema_version),
             "mi_file": "" if mi_path is None else str(mi_path.relative_to(dataset_root)),
             "gate_file": "" if gate_path is None else str(gate_path.relative_to(dataset_root)),
             "artifact_file": "" if artifact_path is None else str(artifact_path.relative_to(dataset_root)),
@@ -752,8 +738,6 @@ def load_custom_task_datasets(dataset_root: Path, subject_filter: str | None = N
         mi_X = np.empty((0, 0, 0), dtype=np.float32)
         mi_y = np.empty((0,), dtype=np.int64)
         mi_trial_ids = np.empty((0,), dtype=np.int64)
-        legacy_baseline = np.empty((0, 0, 0), dtype=np.float32)
-        legacy_iti = np.empty((0, 0, 0), dtype=np.float32)
         gate_pos = np.empty((0, 0, 0), dtype=np.float32)
         gate_neg = np.empty((0, 0, 0), dtype=np.float32)
         gate_hard_neg = np.empty((0, 0, 0), dtype=np.float32)
@@ -763,7 +747,7 @@ def load_custom_task_datasets(dataset_root: Path, subject_filter: str | None = N
         artifact_labels = np.asarray([], dtype=object)
 
         if mi_path is not None:
-            with np.load(mi_path, allow_pickle=True) as data:
+            with np.load(mi_path, allow_pickle=False) as data:
                 signal_unit = _load_npz_text(data, "signal_unit", "volt")
                 current_channel_names = [_decode_npz_text(item) for item in np.asarray(data["channel_names"]).tolist()]
                 current_class_names = [_decode_npz_text(item) for item in np.asarray(data["class_names"]).tolist()]
@@ -779,52 +763,22 @@ def load_custom_task_datasets(dataset_root: Path, subject_filter: str | None = N
                 )
                 subject_id = _load_npz_text(data, "subject_id", subject_id)
                 session_id = _load_npz_text(data, "session_id", session_id)
-                if "run_index" in data.files:
-                    run_index = int(np.asarray(data["run_index"]).reshape(-1)[0])
+                schema_version = _load_npz_int(data, "schema_version", schema_version)
+                save_index = _load_npz_int(data, "save_index", save_index or 0)
                 run_stem = _load_npz_text(data, "run_stem", run_stem) or run_stem
 
-                if "X_mi" in data.files and "y_mi" in data.files:
-                    mi_X = np.asarray(data["X_mi"], dtype=np.float32)
-                    mi_y = np.asarray(data["y_mi"], dtype=np.int64)
-                    mi_trial_ids = (
-                        np.asarray(data["mi_trial_ids"], dtype=np.int64)
-                        if "mi_trial_ids" in data.files
-                        else np.arange(mi_X.shape[0], dtype=np.int64)
-                    )
-                elif "X" in data.files and "y" in data.files:
-                    accepted = (
-                        np.asarray(data["accepted"], dtype=np.int8)
-                        if "accepted" in data.files
-                        else np.ones(np.asarray(data["y"]).shape[0], dtype=np.int8)
-                    )
-                    keep_mask = accepted.astype(bool)
-                    mi_X = np.asarray(data["X"], dtype=np.float32)[keep_mask]
-                    mi_y = np.asarray(data["y"], dtype=np.int64)[keep_mask]
-                    trial_ids = (
-                        np.asarray(data["trial_ids"], dtype=np.int64)
-                        if "trial_ids" in data.files
-                        else np.arange(np.asarray(data["X"]).shape[0], dtype=np.int64)
-                    )
-                    mi_trial_ids = np.asarray(trial_ids[keep_mask], dtype=np.int64)
-                    legacy_baseline = (
-                        np.asarray(data["X_baseline"], dtype=np.float32)
-                        if "X_baseline" in data.files
-                        else np.empty((0, mi_X.shape[1] if mi_X.ndim == 3 else 0, 0), dtype=np.float32)
-                    )
-                    legacy_iti = (
-                        np.asarray(data["X_iti"], dtype=np.float32)
-                        if "X_iti" in data.files
-                        else np.empty((0, mi_X.shape[1] if mi_X.ndim == 3 else 0, 0), dtype=np.float32)
-                    )
-                else:
-                    raise KeyError(f"Missing MI keys in file: {mi_path}")
+                mi_X = np.asarray(data["X_mi"], dtype=np.float32)
+                mi_y = np.asarray(data["y_mi"], dtype=np.int64)
+                mi_trial_ids = (
+                    np.asarray(data["mi_trial_ids"], dtype=np.int64)
+                    if "mi_trial_ids" in data.files
+                    else np.arange(mi_X.shape[0], dtype=np.int64)
+                )
 
                 mi_X = _convert_signal_unit_to_volt(mi_X, signal_unit)
-                legacy_baseline = _convert_signal_unit_to_volt(legacy_baseline, signal_unit)
-                legacy_iti = _convert_signal_unit_to_volt(legacy_iti, signal_unit)
 
         if gate_path is not None:
-            with np.load(gate_path, allow_pickle=True) as data:
+            with np.load(gate_path, allow_pickle=False) as data:
                 signal_unit = _load_npz_text(data, "signal_unit", "volt")
                 current_channel_names = [_decode_npz_text(item) for item in np.asarray(data["channel_names"]).tolist()]
                 current_class_names = [_decode_npz_text(item) for item in np.asarray(data["class_names"]).tolist()]
@@ -838,6 +792,8 @@ def load_custom_task_datasets(dataset_root: Path, subject_filter: str | None = N
                     class_names=class_names,
                     sampling_rate=sampling_rate,
                 )
+                schema_version = _load_npz_int(data, "schema_version", schema_version)
+                save_index = _load_npz_int(data, "save_index", save_index or 0)
                 run_stem = _load_npz_text(data, "run_stem", run_stem) or run_stem
                 gate_pos = (
                     _convert_signal_unit_to_volt(np.asarray(data["X_gate_pos"], dtype=np.float32), signal_unit)
@@ -868,13 +824,6 @@ def load_custom_task_datasets(dataset_root: Path, subject_filter: str | None = N
                     else gate_hard_neg_sources
                 )
 
-        if gate_path is None and mi_path is not None and legacy_baseline.size and legacy_iti.size:
-            gate_pos = np.asarray(mi_X, dtype=np.float32)
-            gate_neg = np.concatenate([legacy_baseline, legacy_iti], axis=0).astype(np.float32)
-            gate_hard_neg = np.empty((0, gate_pos.shape[1], gate_pos.shape[2]), dtype=np.float32)
-            gate_neg_sources = np.asarray(["legacy_rest"] * gate_neg.shape[0], dtype=object)
-            gate_hard_neg_sources = np.asarray([], dtype=object)
-
         if gate_neg.ndim == 3 and gate_neg.shape[0] > 0:
             gate_neg, gate_neg_sources, dropped_continuous = _exclude_continuous_sourced_segments(
                 gate_neg,
@@ -883,7 +832,7 @@ def load_custom_task_datasets(dataset_root: Path, subject_filter: str | None = N
             file_record["gate_neg_dropped_continuous"] = int(dropped_continuous)
 
         if artifact_path is not None:
-            with np.load(artifact_path, allow_pickle=True) as data:
+            with np.load(artifact_path, allow_pickle=False) as data:
                 signal_unit = _load_npz_text(data, "signal_unit", "volt")
                 current_channel_names = [_decode_npz_text(item) for item in np.asarray(data["channel_names"]).tolist()]
                 current_class_names = [_decode_npz_text(item) for item in np.asarray(data["class_names"]).tolist()]
@@ -897,6 +846,8 @@ def load_custom_task_datasets(dataset_root: Path, subject_filter: str | None = N
                     class_names=class_names,
                     sampling_rate=sampling_rate,
                 )
+                schema_version = _load_npz_int(data, "schema_version", schema_version)
+                save_index = _load_npz_int(data, "save_index", save_index or 0)
                 run_stem = _load_npz_text(data, "run_stem", run_stem) or run_stem
                 if "X_artifact" in data.files:
                     artifact_X = _convert_signal_unit_to_volt(np.asarray(data["X_artifact"], dtype=np.float32), signal_unit)
@@ -904,7 +855,7 @@ def load_custom_task_datasets(dataset_root: Path, subject_filter: str | None = N
                     artifact_labels = np.asarray(data["artifact_labels"], dtype=object)
 
         if continuous_path is not None:
-            with np.load(continuous_path, allow_pickle=True) as data:
+            with np.load(continuous_path, allow_pickle=False) as data:
                 signal_unit = _load_npz_text(data, "signal_unit", "volt")
                 current_channel_names = [_decode_npz_text(item) for item in np.asarray(data["channel_names"]).tolist()]
                 current_class_names = [_decode_npz_text(item) for item in np.asarray(data["class_names"]).tolist()]
@@ -918,6 +869,8 @@ def load_custom_task_datasets(dataset_root: Path, subject_filter: str | None = N
                     class_names=class_names,
                     sampling_rate=sampling_rate,
                 )
+                schema_version = _load_npz_int(data, "schema_version", schema_version)
+                save_index = _load_npz_int(data, "save_index", save_index or 0)
                 run_stem = _load_npz_text(data, "run_stem", run_stem) or run_stem
 
                 continuous_X = (
@@ -946,18 +899,13 @@ def load_custom_task_datasets(dataset_root: Path, subject_filter: str | None = N
                     else np.asarray([], dtype=np.int64)
                 )
                 event_block_indices = np.full(event_labels.shape[0], -1, dtype=np.int64)
-                if "continuous_events" in data.files:
-                    raw_events = np.asarray(data["continuous_events"], dtype=object).reshape(-1)
-                    for index, raw_item in enumerate(raw_events.tolist()):
-                        if index >= event_block_indices.shape[0]:
-                            break
-                        try:
-                            payload = json.loads(_decode_npz_text(raw_item))
-                        except Exception:
-                            continue
-                        block_index = int(payload.get("block_index", -1))
-                        if block_index > 0:
-                            event_block_indices[index] = int(block_index - 1)
+                if "continuous_block_indices" in data.files:
+                    raw_block_indices = np.asarray(data["continuous_block_indices"], dtype=np.int64).reshape(-1)
+                    if raw_block_indices.shape[0] == event_block_indices.shape[0]:
+                        event_block_indices = np.asarray(
+                            [int(item - 1) if int(item) > 0 else -1 for item in raw_block_indices.tolist()],
+                            dtype=np.int64,
+                        )
 
                 if block_starts.size and event_samples.size and block_ends.size:
                     for index, sample_index in enumerate(event_samples.tolist()):
@@ -990,7 +938,8 @@ def load_custom_task_datasets(dataset_root: Path, subject_filter: str | None = N
         file_record["run_stem"] = group_token
         file_record["subject_id"] = subject_id
         file_record["session_id"] = session_token
-        file_record["run_index"] = run_index
+        file_record["save_index"] = save_index
+        file_record["schema_version"] = int(schema_version)
         if run_issues:
             file_record["dropped_reason"] = "|".join(run_issues)
 
@@ -1056,7 +1005,7 @@ def load_custom_task_datasets(dataset_root: Path, subject_filter: str | None = N
         detail_message = f" Dropped runs: {dropped_details[:8]}" if dropped_details else ""
         raise RuntimeError(
             "No usable MI training samples were found. "
-            "Expected at least one valid *_mi_epochs.npz (or legacy *_epochs.npz)."
+            "Expected at least one valid *_mi_epochs.npz."
             + detail_message
         )
     if channel_names is None or class_names is None or sampling_rate is None:
@@ -4587,7 +4536,7 @@ def train_custom_model(
                         "rest_reject_rate": float(test_recommendation["rest_reject_rate"]),
                     }
     else:
-        rest_calibration_summary["mode"] = "legacy_imagery_only_no_rest_segments"
+        rest_calibration_summary["mode"] = "imagery_only_no_rest_segments"
 
     gate_model_artifact = bank_artifact.get("control_gate") if isinstance(bank_artifact.get("control_gate"), dict) else None
     artifact_model_artifact = (

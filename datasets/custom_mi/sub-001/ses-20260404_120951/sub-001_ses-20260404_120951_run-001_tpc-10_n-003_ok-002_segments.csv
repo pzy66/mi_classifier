@@ -1,0 +1,13 @@
+﻿segment_id,save_index,segment_type,label,start_sample,end_sample,duration_sec,trial_id,mi_run_index,run_trial_index,block_index,prompt_index,accepted,execution_success,source_start_event,source_end_event
+1,1,trial,tongue,16,2336,9.28,1,1,1,,,1,,trial_start,trial_end
+2,1,baseline,tongue,17,539,2.088,1,1,1,,,1,,fixation_start,baseline_end
+3,1,cue,tongue,540,809,1.076,1,1,1,,,1,,cue_start,imagery_start
+4,1,imagery,tongue,809,1812,4.012,1,1,1,,,1,,imagery_start,imagery_end
+5,1,iti,tongue,1813,2336,2.092,1,1,1,,,1,,iti_start,trial_end
+6,1,trial,left_hand,2337,4656,9.276,2,1,2,,,1,,trial_start,trial_end
+7,1,baseline,left_hand,2338,2859,2.084,2,1,2,,,1,,fixation_start,baseline_end
+8,1,cue,left_hand,2860,3129,1.076,2,1,2,,,1,,cue_start,imagery_start
+9,1,imagery,left_hand,3129,4132,4.012,2,1,2,,,1,,imagery_start,imagery_end
+10,1,iti,left_hand,4133,4656,2.092,2,1,2,,,1,,iti_start,trial_end
+11,1,trial,right_hand,4657,5016,1.436,3,1,3,,,0,,trial_start,trial_end
+12,1,baseline,right_hand,4658,5015,1.428,3,1,3,,,0,,fixation_start,baseline_end

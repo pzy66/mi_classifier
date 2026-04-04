@@ -2,7 +2,7 @@
 """End-to-end pipeline verification for MI project.
 
 Flow:
-1) Simulate collection and save two runs into custom_mi-like structure.
+1) Simulate collection and save three runs across two sessions into custom_mi-like structure.
 2) Verify viewer can discover/load the saved npz files.
 3) Train model from those runs.
 4) Run one offline realtime prediction window with the trained artifact.
@@ -26,6 +26,7 @@ DATASET_ROOT = RUNTIME_ROOT / "datasets" / "custom_mi"
 MODEL_PATH = RUNTIME_ROOT / "models" / "e2e_realtime_model.joblib"
 REPORT_PATH = RUNTIME_ROOT / "reports" / "e2e_training_summary.json"
 SUMMARY_PATH = RUNTIME_ROOT / "e2e_check_summary.json"
+STRICT_SPLIT_STRATEGIES = {"session_holdout", "group_shuffle"}
 
 
 def _prepare_env() -> None:
@@ -83,12 +84,13 @@ def _build_synthetic_capture(run_cfg: SimulatedRun) -> tuple[np.ndarray, list[di
     rng = np.random.default_rng(run_cfg.seed)
     sequence = _class_order(run_cfg.trials_per_class)
 
-    # Keep synthetic timing close to collection defaults so default training windows
-    # (2.0/2.5/3.0s with offset search) remain valid.
-    baseline = 500   # 2.0s @ 250Hz
-    cue = 250        # 1.0s @ 250Hz
+    # Keep synthetic timing compatible with the current default MI/gate training
+    # windows. Gate positives/negatives are aligned to the shortest available
+    # epoch, so baseline/ITI must also satisfy the largest default crop.
+    baseline = 1000  # 4.0s @ 250Hz
+    cue = 500        # 2.0s @ 250Hz
     imagery = 1000   # 4.0s @ 250Hz
-    iti = 625        # 2.5s @ 250Hz
+    iti = 1000       # 4.0s @ 250Hz
     gap = 16
 
     cursor = 8
@@ -163,12 +165,11 @@ def _save_one_run(*, session_id: str, run_cfg: SimulatedRun, subject_id: str = "
         channel_names=["C3", "Cz", "C4", "PO3", "PO4", "O1", "Oz", "O2"],
         channel_positions=[0, 1, 2, 3, 4, 5, 6, 7],
         trials_per_class=int(run_cfg.trials_per_class),
-        baseline_sec=2.0,
-        cue_sec=1.0,
+        baseline_sec=4.0,
+        cue_sec=2.0,
         imagery_sec=4.0,
-        iti_sec=2.5,
+        iti_sec=4.0,
         random_seed=42,
-        save_epochs_npz=True,
         operator="e2e-check",
         notes="synthetic pipeline check",
         board_name="Synthetic",
@@ -185,8 +186,8 @@ def _save_one_run(*, session_id: str, run_cfg: SimulatedRun, subject_id: str = "
     )
 
 
-def _assert_partial_artifact_reserves_run_index() -> dict:
-    """A stale partial artifact must reserve its run index and prevent overwrite."""
+def _assert_partial_artifact_reserves_save_index() -> dict:
+    """A stale partial artifact must reserve its save index and prevent overwrite."""
     session_dir = create_session_folder(DATASET_ROOT, "guard", "index_guard")
     orphan_path = session_dir / "sub-guard_ses-index_guard_run-007_tpc-01_n-004_ok-004_raw.fif"
     orphan_path.write_bytes(b"partial-save-placeholder")
@@ -195,11 +196,11 @@ def _assert_partial_artifact_reserves_run_index() -> dict:
         run_cfg=SimulatedRun(trials_per_class=1, bad_trial_ids=set(), seed=21),
         subject_id="guard",
     )
-    if int(result["run_index"]) != 8:
-        raise AssertionError(f"expected next run index 8 after orphan artifact, got {result['run_index']}")
+    if int(result["save_index"]) != 8:
+        raise AssertionError(f"expected next save index 8 after orphan artifact, got {result['save_index']}")
     return {
         "orphan_path": str(orphan_path),
-        "next_run_index": int(result["run_index"]),
+        "next_save_index": int(result["save_index"]),
         "run_stem": str(result["run_stem"]),
     }
 
@@ -224,11 +225,10 @@ def _assert_marker_mismatch_is_rejected() -> str:
         channel_positions=[0, 1, 2, 3, 4, 5, 6, 7],
         trials_per_class=2,
         baseline_sec=2.0,
-        cue_sec=1.0,
+        cue_sec=2.0,
         imagery_sec=4.0,
         iti_sec=2.5,
         random_seed=42,
-        save_epochs_npz=True,
         operator="e2e-check",
         notes="synthetic marker mismatch check",
         board_name="Synthetic",
@@ -258,19 +258,33 @@ def run_e2e_check() -> dict:
         shutil.rmtree(RUNTIME_ROOT)
     RUNTIME_ROOT.mkdir(parents=True, exist_ok=True)
 
-    # 1) Collection/save simulation (two runs, different trial counts).
-    run1 = _save_one_run(session_id="e2e_session", run_cfg=SimulatedRun(trials_per_class=4, bad_trial_ids=set(), seed=7))
-    run2 = _save_one_run(session_id="e2e_session", run_cfg=SimulatedRun(trials_per_class=2, bad_trial_ids={1}, seed=13))
-    index_guard = _assert_partial_artifact_reserves_run_index()
+    # 1) Collection/save simulation (three runs across two sessions to satisfy strict split defaults).
+    run1 = _save_one_run(
+        session_id="e2e_session_a",
+        run_cfg=SimulatedRun(trials_per_class=4, bad_trial_ids={1}, seed=7),
+    )
+    run2 = _save_one_run(
+        session_id="e2e_session_b",
+        run_cfg=SimulatedRun(trials_per_class=2, bad_trial_ids={1}, seed=13),
+    )
+    run3 = _save_one_run(
+        session_id="e2e_session_b",
+        run_cfg=SimulatedRun(trials_per_class=2, bad_trial_ids={1}, seed=17),
+    )
+    collection_runs = [run1, run2, run3]
+    index_guard = _assert_partial_artifact_reserves_save_index()
     mismatch_guard_message = _assert_marker_mismatch_is_rejected()
 
-    session_dir = Path(run1["session_dir"])
-    manifest_path = Path(run2["manifest_csv_path"])
-    epoch_files = sorted(session_dir.glob("*_epochs.npz"))
+    manifest_path = Path(run3["manifest_csv_path"])
+    primary_session_dir = Path(run2["session_dir"])
+    subject_epoch_files = sorted(path for path in DATASET_ROOT.rglob("*_mi_epochs.npz") if "sub-001" in str(path))
 
     # 2) Viewer stage checks (data discovery + file parsing; skip GUI launch for headless stability).
     discovered = discover_epoch_files(DATASET_ROOT)
-    loaded_preview = [load_epochs_npz(path) for path in discovered]
+    discovered_subject = [path for path in discovered if "sub-001" in str(path)]
+    if not discovered_subject:
+        raise AssertionError("viewer discovery did not find any subject-001 epoch files")
+    loaded_preview = [load_epochs_npz(path) for path in discovered_subject]
 
     # 3) Training stage checks.
     summary = train_custom_model(
@@ -281,6 +295,12 @@ def run_e2e_check() -> dict:
         random_state=42,
         min_class_trials=2,
     )
+    split_strategy = str(summary.get("split_strategy") or "")
+    if split_strategy not in STRICT_SPLIT_STRATEGIES:
+        raise AssertionError(
+            "E2E training unexpectedly fell back to a non-strict split strategy: "
+            f"{split_strategy or 'missing'}"
+        )
 
     # 4) Realtime offline-prediction checks.
     artifact = load_realtime_model(MODEL_PATH)
@@ -298,7 +318,7 @@ def run_e2e_check() -> dict:
         "paths": {
             "runtime_root": str(RUNTIME_ROOT),
             "dataset_root": str(DATASET_ROOT),
-            "session_dir": str(session_dir),
+            "session_dir": str(primary_session_dir),
             "manifest_csv": str(manifest_path),
             "model_path": str(MODEL_PATH),
             "report_path": str(REPORT_PATH),
@@ -306,23 +326,29 @@ def run_e2e_check() -> dict:
         "collection": {
             "run1_stem": run1["run_stem"],
             "run2_stem": run2["run_stem"],
+            "run3_stem": run3["run_stem"],
             "run1_trial_count": int(run1["trial_count"]),
             "run2_trial_count": int(run2["trial_count"]),
+            "run3_trial_count": int(run3["trial_count"]),
             "run1_accepted": int(run1["accepted_trial_count"]),
             "run2_accepted": int(run2["accepted_trial_count"]),
-            "epoch_file_count_in_session": len(epoch_files),
+            "run3_accepted": int(run3["accepted_trial_count"]),
+            "epoch_file_count_for_subject": len(subject_epoch_files),
+            "session_count_for_subject": len({str(Path(run["session_dir"]).name) for run in collection_runs}),
         },
         "viewer": {
             "discovered_npz_count": len(discovered),
+            "discovered_subject_npz_count": len(discovered_subject),
             "first_npz_shape": list(loaded_preview[0].X_uV.shape) if loaded_preview else [],
             "first_npz_sampling_rate": float(loaded_preview[0].sampling_rate) if loaded_preview else None,
         },
         "guards": {
-            "partial_artifact_run_index": index_guard,
+            "partial_artifact_save_index": index_guard,
             "marker_mismatch_rejected": mismatch_guard_message,
         },
         "training": {
             "pipeline_tag": pipeline_tag,
+            "split_strategy": split_strategy,
             "total_trials_used": int(summary["total_trials"]),
             "source_records_count": int(len(summary["source_records"])),
             "test_acc": float(metrics.get("bank_test_acc", metrics.get("test_acc", 0.0))),

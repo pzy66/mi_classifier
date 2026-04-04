@@ -1,19 +1,51 @@
-﻿# code 目录说明
+# Code README
 
-`code/` 按职责拆分，避免采集、训练、实时逻辑互相耦合。
+`code/` is split by responsibility to keep collection, training, realtime, and
+inspection separated.
 
-## 目录职责
+## Modules
 
-- `collection/`：采集 UI 与会话保存（只采集，不做在线分类）
-- `training/`：读取 `datasets/custom_mi` 并训练模型工件
-- `realtime/`：加载已训练工件做实时推理
-- `viewer/`：查看 `*_mi_epochs.npz` / `*_epochs.npz`
-- `shared/`：采集、训练、实时共用底层模块
-- `legacy/`：历史代码归档，不参与当前主流程
+- `collection/`
+  Collection UI, session flow control, marker emission, save triggering.
+- `training/`
+  Reads task-specific derivatives from `datasets/custom_mi` and trains MI /
+  gate / artifact models.
+- `realtime/`
+  Loads trained artifacts for online inference only.
+- `viewer/`
+  04 viewer. Loads one full saved run bundle for post-save inspection.
+- `shared/`
+  Shared schema, preprocessing, model utilities, and save logic.
+- `legacy/`
+  Archived code, not part of the active pipeline.
 
-## 推荐入口
+## Current Schema Contract
 
-优先使用项目根目录启动脚本：
+The active codebase targets `schema_version=2`.
+
+Canonical saved run data includes:
+
+- `board_data.npy`
+- `board_map.json`
+- `events.csv`
+- `trials.csv`
+- `segments.csv`
+- `session_meta.json`
+- `quality_report.json`
+- `raw.fif`
+
+Task derivatives include:
+
+- `*_mi_epochs.npz`
+- `*_gate_epochs.npz`
+- `*_artifact_epochs.npz`
+- `*_continuous.npz`
+
+Viewer discovery now defaults to `*_session_meta.json`, not only `*_mi_epochs.npz`.
+
+## Recommended Entry Points
+
+From project root:
 
 - `run_01_collection_only.py`
 - `run_02_training.py`
@@ -21,19 +53,23 @@
 - `run_04_view_collected_npz.py`
 - `run_05_channel_monitor.py`
 
-这些脚本会自动处理路径，适合直接运行。
+## Debugging Notes
 
-如果终端没有 `python` 命令，统一改用：
+- `run_*_pycharm.py` is GUI-friendly.
+- For full tracebacks, run the module entry directly:
+  - `code/collection/mi_data_collector.py`
+  - `code/training/train_custom_dataset.py`
+  - `code/realtime/mi_realtime_infer_only.py`
+  - `code/viewer/mi_npz_viewer.py`
 
-```powershell
-& 'C:\Users\P1233\miniconda3\envs\MI\python.exe' <script.py>
-```
+## Change Discipline
 
-说明：`run_*_pycharm.py` 启动器偏 GUI 友好，异常时可能弹窗；在终端排障时优先直接运行对应主脚本（如 `train_custom_dataset.py`）。
+When schema, save fields, training loaders, or viewer support changes, update:
 
-## 开发约束
-
-- 新增采集相关逻辑：放在 `collection/` + `shared/`
-- 新增训练相关逻辑：放在 `training/` + `shared/`
-- 新增实时相关逻辑：放在 `realtime/` + `shared/`
-- 不要把 UI 代码、模型训练代码和在线推理代码写在同一文件
+- `collection/README.md`
+- `collection/README_SAVE_NAMING.md`
+- `training/README.md`
+- `training/README_DATA_LOADING.md`
+- `training/README_DATA_ADMISSION.md`
+- `viewer/README.md`
+- `datasets/custom_mi/README.md`

@@ -1,0 +1,23 @@
+{
+  "schema_version": 2,
+  "exporter_name": "mi_collection",
+  "created_at": "2026-04-04T12:00:22",
+  "source_run_stem": "sub-001_ses-20260404_115856_run-001_tpc-10_n-005_ok-004",
+  "source_save_index": 1,
+  "source_sha256": "62c49c9a9fdfe942d7227ce9d56e23c68ea4030cb891629de72868c52c520049",
+  "source_files": {
+    "board_data_npy": "sub-001/ses-20260404_115856/sub-001_ses-20260404_115856_run-001_tpc-10_n-005_ok-004_board_data.npy",
+    "events_csv": "sub-001/ses-20260404_115856/sub-001_ses-20260404_115856_run-001_tpc-10_n-005_ok-004_events.csv",
+    "trials_csv": "sub-001/ses-20260404_115856/sub-001_ses-20260404_115856_run-001_tpc-10_n-005_ok-004_trials.csv",
+    "segments_csv": "sub-001/ses-20260404_115856/sub-001_ses-20260404_115856_run-001_tpc-10_n-005_ok-004_segments.csv"
+  },
+  "subject_id": "001",
+  "session_id": "20260404_115856",
+  "protocol_mode": "mi_only",
+  "derivation_name": "mi_epochs",
+  "derivation_policy": {
+    "window_sec": 4.0,
+    "source_segment": "imagery",
+    "accepted_trials_only": true
+  }
+}

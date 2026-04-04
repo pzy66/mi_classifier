@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import os
 import re
@@ -138,12 +139,16 @@ EVENT_CODE_MAP.update({item["imagery_marker"]: f"imagery_{item['key']}" for item
 
 EVENT_NAME_TO_CODE = {name: code for code, name in EVENT_CODE_MAP.items()}
 GENERIC_CHANNEL_NAMES = [f"EEG{i + 1}" for i in range(32)]
+COLLECTION_SCHEMA_VERSION = 2
+COLLECTION_EXPORTER_NAME = "mi_collection"
 COLLECTION_MANIFEST_NAME = "collection_manifest.csv"
 COLLECTION_MANIFEST_FIELDS = [
     "saved_at",
+    "schema_version",
     "subject_id",
     "session_id",
-    "run_index",
+    "protocol_mode",
+    "save_index",
     "run_stem",
     "trials_per_class",
     "mi_run_count",
@@ -154,15 +159,22 @@ COLLECTION_MANIFEST_FIELDS = [
     "sampling_rate_hz",
     "channel_names",
     "class_names",
+    "board_data_npy",
+    "board_map_json",
     "mi_epochs_npz",
+    "mi_epochs_meta_json",
     "gate_epochs_npz",
+    "gate_epochs_meta_json",
     "artifact_epochs_npz",
+    "artifact_epochs_meta_json",
     "continuous_npz",
-    "epochs_npz",
+    "continuous_meta_json",
     "session_raw_fif",
     "events_csv",
     "trials_csv",
+    "segments_csv",
     "session_meta_json",
+    "quality_report_json",
 ]
 
 
@@ -183,6 +195,7 @@ class SessionSettings:
     imagery_sec: float
     iti_sec: float
     random_seed: int
+    protocol_mode: str = "full"
     run_count: int = 3
     max_consecutive_same_class: int = 2
     run_rest_sec: float = 60.0
@@ -214,7 +227,6 @@ class SessionSettings:
     caffeine_intake: str = ""
     recent_exercise: str = ""
     sleep_note: str = ""
-    save_epochs_npz: bool = True
     operator: str = ""
     notes: str = ""
     board_name: str = ""
@@ -395,11 +407,11 @@ def create_session_folder(output_root: str | Path, subject_id: str, session_id: 
     return folder
 
 
-def _next_run_index(session_dir: Path) -> int:
-    """Return next run index under one session directory.
+def _next_save_index(session_dir: Path) -> int:
+    """Return next save index under one session directory.
 
     Scan every run-scoped artifact, not only metadata, so a failed partial save
-    still reserves its run index and cannot be overwritten by a retry.
+    still reserves its save index and cannot be overwritten by a retry.
     """
     run_pattern = re.compile(r"_run-(\d{3})_")
     max_index = 0
@@ -410,7 +422,7 @@ def _next_run_index(session_dir: Path) -> int:
         if matched:
             max_index = max(max_index, int(matched.group(1)))
         elif path.name == "session_meta.json":
-            # Legacy naming without run suffix.
+            # Legacy naming without run suffix should still reserve save index 1.
             max_index = max(max_index, 1)
     return max_index + 1
 
@@ -418,7 +430,7 @@ def _next_run_index(session_dir: Path) -> int:
 def _build_run_stem(
     *,
     settings: SessionSettings,
-    run_index: int,
+    save_index: int,
     trial_count: int,
     accepted_count: int,
 ) -> str:
@@ -428,7 +440,7 @@ def _build_run_stem(
     return (
         f"sub-{subject_token}"
         f"_ses-{session_token}"
-        f"_run-{int(run_index):03d}"
+        f"_run-{int(save_index):03d}"
         f"_tpc-{int(settings.trials_per_class):02d}"
         f"_n-{int(trial_count):03d}"
         f"_ok-{int(accepted_count):03d}"
@@ -557,7 +569,11 @@ def _update_trials_from_events(
     return records
 
 
-def _make_annotations(events: list[dict[str, object]], sfreq: float) -> mne.Annotations:
+def _make_annotations(
+    events: list[dict[str, object]],
+    sfreq: float,
+    segment_rows: list[dict[str, object]] | None = None,
+) -> mne.Annotations:
     """Convert enriched events into MNE annotations."""
     onsets = []
     durations = []
@@ -569,6 +585,20 @@ def _make_annotations(events: list[dict[str, object]], sfreq: float) -> mne.Anno
         onsets.append(float(sample_index) / float(sfreq))
         durations.append(0.0)
         descriptions.append(str(event["event_name"]))
+    for row in segment_rows or []:
+        start_sample = row.get("start_sample")
+        end_sample = row.get("end_sample")
+        if start_sample is None or end_sample is None:
+            continue
+        start_index = int(start_sample)
+        stop_index = max(int(end_sample), start_index + 1)
+        label = str(row.get("label", "")).strip()
+        description = str(row.get("segment_type", "segment")).strip() or "segment"
+        if label:
+            description = f"{description}:{label}"
+        onsets.append(float(start_index) / float(sfreq))
+        durations.append(float((stop_index - start_index) / float(sfreq)))
+        descriptions.append(description)
     return mne.Annotations(onset=onsets, duration=durations, description=descriptions)
 
 
@@ -613,13 +643,43 @@ def _write_csv(path: Path, rows: list[dict[str, object]], fieldnames: list[str])
             writer.writerow(row)
 
 
+def _write_json(path: Path, payload: dict[str, object]) -> None:
+    """Write a UTF-8 JSON file with stable formatting."""
+    with path.open("w", encoding="utf-8") as file:
+        json.dump(payload, file, indent=2, ensure_ascii=False)
+
+
+def _coerce_manifest_save_index(raw_row: dict[str, object]) -> int | str:
+    """Best-effort conversion from legacy/new manifest rows to save_index."""
+    for field_name in ("save_index", "run_index"):
+        raw_value = str(raw_row.get(field_name, "")).strip()
+        if not raw_value:
+            continue
+        try:
+            return int(float(raw_value))
+        except Exception:
+            continue
+    run_stem = str(raw_row.get("run_stem", "")).strip()
+    matched = re.search(r"_run-(\d{3})_", run_stem)
+    if matched:
+        return int(matched.group(1))
+    return ""
+
+
 def _normalize_manifest_row(raw_row: dict[str, object]) -> dict[str, object]:
     """Normalize legacy/new manifest rows into the current schema."""
     row = {field: raw_row.get(field, "") for field in COLLECTION_MANIFEST_FIELDS}
+    schema_version = str(raw_row.get("schema_version", "")).strip()
+    if not schema_version:
+        schema_version = "1" if str(raw_row.get("run_index", "")).strip() else ""
+    row["schema_version"] = schema_version
+    row["save_index"] = _coerce_manifest_save_index(raw_row)
+    if not str(row.get("protocol_mode", "")).strip():
+        row["protocol_mode"] = "full"
     if not row.get("artifact_epochs_npz"):
         row["artifact_epochs_npz"] = raw_row.get("artifact_npz", "")
-    if not row.get("epochs_npz"):
-        row["epochs_npz"] = raw_row.get("legacy_epochs_npz", "")
+    if not row.get("mi_epochs_npz"):
+        row["mi_epochs_npz"] = raw_row.get("epochs_npz", raw_row.get("legacy_epochs_npz", ""))
     return row
 
 
@@ -647,13 +707,40 @@ def _ensure_manifest_schema(manifest_path: Path) -> None:
             writer.writerow(_normalize_manifest_row(row))
 
 
+def _string_array(values: str | list[object] | tuple[object, ...] | np.ndarray) -> np.ndarray:
+    """Store text arrays as numpy unicode instead of object arrays."""
+    if isinstance(values, str):
+        return np.asarray([values], dtype=np.str_)
+    return np.asarray([str(item) for item in list(values)], dtype=np.str_)
+
+
+def _relative_path(path: Path, root: str | Path) -> str:
+    """Return a portable relative path when possible."""
+    try:
+        return path.resolve().relative_to(Path(root).resolve()).as_posix()
+    except Exception:
+        return path.name
+
+
+def _compute_sha256(path: Path) -> str:
+    """Compute a SHA-256 digest for one file."""
+    digest = hashlib.sha256()
+    with path.open("rb") as file:
+        while True:
+            chunk = file.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _append_collection_manifest(output_root: str | Path, record: dict[str, object]) -> Path:
     """Append one run-level row to dataset manifest CSV for easier training traceability."""
     root = Path(output_root)
     root.mkdir(parents=True, exist_ok=True)
     manifest_path = root / COLLECTION_MANIFEST_NAME
     _ensure_manifest_schema(manifest_path)
-    write_header = not manifest_path.exists()
+    write_header = not manifest_path.exists() or manifest_path.stat().st_size == 0
     with manifest_path.open("a", encoding="utf-8-sig", newline="") as file:
         writer = csv.DictWriter(file, fieldnames=COLLECTION_MANIFEST_FIELDS)
         if write_header:
@@ -662,12 +749,12 @@ def _append_collection_manifest(output_root: str | Path, record: dict[str, objec
     return manifest_path
 
 
-def _first_event_sample(
+def _first_matching_event(
     events: list[dict[str, object]],
     *,
     trial_id: int,
     event_names: list[str],
-) -> int | None:
+) -> dict[str, object] | None:
     for event in events:
         event_trial_id = event.get("trial_id")
         if event_trial_id is None:
@@ -678,7 +765,19 @@ def _first_event_sample(
             continue
         sample_index = event.get("sample_index")
         if sample_index is not None:
-            return int(sample_index)
+            return event
+    return None
+
+
+def _first_event_sample(
+    events: list[dict[str, object]],
+    *,
+    trial_id: int,
+    event_names: list[str],
+) -> int | None:
+    matched_event = _first_matching_event(events, trial_id=trial_id, event_names=event_names)
+    if matched_event is not None:
+        return int(matched_event["sample_index"])
     return None
 
 
@@ -699,6 +798,239 @@ def _extract_intervals(events: list[dict[str, object]], start_name: str, end_nam
             stop_index = max(sample_index, start_index + 1)
             intervals.append((start_index, stop_index))
     return intervals
+
+
+def _extract_event_pairs(
+    events: list[dict[str, object]],
+    start_names: str | list[str] | tuple[str, ...],
+    end_names: str | list[str] | tuple[str, ...],
+) -> list[tuple[dict[str, object], dict[str, object]]]:
+    """Return ordered start/end event pairs while preserving start metadata."""
+    start_set = {str(start_names)} if isinstance(start_names, str) else {str(item) for item in start_names}
+    end_set = {str(end_names)} if isinstance(end_names, str) else {str(item) for item in end_names}
+    pending_starts: list[dict[str, object]] = []
+    pairs: list[tuple[dict[str, object], dict[str, object]]] = []
+    for event in events:
+        name = str(event.get("event_name", ""))
+        sample_index = event.get("sample_index")
+        if sample_index is None:
+            continue
+        if name in start_set:
+            pending_starts.append(event)
+        elif name in end_set and pending_starts:
+            start_event = pending_starts.pop(0)
+            pairs.append((start_event, event))
+    return pairs
+
+
+def _build_segment_rows(
+    events: list[dict[str, object]],
+    trials: list[TrialRecord],
+    *,
+    sampling_rate: float,
+) -> list[dict[str, object]]:
+    """Build interval-style semantic segments from atomic event markers."""
+    rows: list[dict[str, object]] = []
+    next_segment_id = 1
+
+    def _append_segment(
+        *,
+        segment_type: str,
+        start_sample: int | None,
+        end_sample: int | None,
+        label: str = "",
+        trial_id: int | None = None,
+        mi_run_index: int | None = None,
+        run_trial_index: int | None = None,
+        block_index: int | None = None,
+        prompt_index: int | None = None,
+        accepted: bool | int | None = None,
+        execution_success: bool | int | None = None,
+        source_start_event: str = "",
+        source_end_event: str = "",
+    ) -> None:
+        nonlocal next_segment_id
+        if start_sample is None or end_sample is None:
+            return
+        start_index = int(start_sample)
+        stop_index = max(int(end_sample), start_index + 1)
+        rows.append(
+            {
+                "segment_id": next_segment_id,
+                "segment_type": str(segment_type),
+                "label": str(label),
+                "start_sample": start_index,
+                "end_sample": stop_index,
+                "duration_sec": float((stop_index - start_index) / float(sampling_rate)),
+                "trial_id": "" if trial_id is None else int(trial_id),
+                "mi_run_index": "" if mi_run_index is None else int(mi_run_index),
+                "run_trial_index": "" if run_trial_index is None else int(run_trial_index),
+                "block_index": "" if block_index is None else int(block_index),
+                "prompt_index": "" if prompt_index is None else int(prompt_index),
+                "accepted": "" if accepted is None else int(bool(accepted)),
+                "execution_success": "" if execution_success is None else int(bool(execution_success)),
+                "source_start_event": str(source_start_event),
+                "source_end_event": str(source_end_event),
+            }
+        )
+        next_segment_id += 1
+
+    for trial in trials:
+        trial_id = int(trial.trial_id)
+        mi_run_index = int(trial.run_index)
+        run_trial_index = int(trial.run_trial_index)
+        class_name = str(trial.class_name)
+
+        trial_start_event = _first_matching_event(events, trial_id=trial_id, event_names=["trial_start"])
+        trial_end_event = _first_matching_event(events, trial_id=trial_id, event_names=["trial_end"])
+        trial_start = None if trial_start_event is None else int(trial_start_event["sample_index"])
+        trial_end = (
+            int(trial_end_event["sample_index"])
+            if trial_end_event is not None
+            else trial.trial_end_sample
+        )
+        _append_segment(
+            segment_type="trial",
+            start_sample=trial_start,
+            end_sample=trial_end,
+            label=class_name,
+            trial_id=trial_id,
+            mi_run_index=mi_run_index,
+            run_trial_index=run_trial_index,
+            accepted=trial.accepted,
+            source_start_event="" if trial_start_event is None else str(trial_start_event.get("event_name", "")),
+            source_end_event="" if trial_end_event is None else str(trial_end_event.get("event_name", "")),
+        )
+
+        baseline_start_event = _first_matching_event(
+            events,
+            trial_id=trial_id,
+            event_names=["fixation_start", "baseline_start"],
+        )
+        baseline_end_event = _first_matching_event(
+            events,
+            trial_id=trial_id,
+            event_names=["baseline_end", "cue_start", f"cue_{class_name}"],
+        )
+        _append_segment(
+            segment_type="baseline",
+            start_sample=None if baseline_start_event is None else int(baseline_start_event["sample_index"]),
+            end_sample=None if baseline_end_event is None else int(baseline_end_event["sample_index"]),
+            label=class_name,
+            trial_id=trial_id,
+            mi_run_index=mi_run_index,
+            run_trial_index=run_trial_index,
+            accepted=trial.accepted,
+            source_start_event="" if baseline_start_event is None else str(baseline_start_event.get("event_name", "")),
+            source_end_event="" if baseline_end_event is None else str(baseline_end_event.get("event_name", "")),
+        )
+
+        cue_start_event = _first_matching_event(
+            events,
+            trial_id=trial_id,
+            event_names=["cue_start", f"cue_{class_name}"],
+        )
+        imagery_start_event = _first_matching_event(
+            events,
+            trial_id=trial_id,
+            event_names=["imagery_start", f"imagery_{class_name}"],
+        )
+        cue_start = None if cue_start_event is None else int(cue_start_event["sample_index"])
+        imagery_start = None if imagery_start_event is None else int(imagery_start_event["sample_index"])
+        _append_segment(
+            segment_type="cue",
+            start_sample=cue_start,
+            end_sample=imagery_start,
+            label=class_name,
+            trial_id=trial_id,
+            mi_run_index=mi_run_index,
+            run_trial_index=run_trial_index,
+            accepted=trial.accepted,
+            source_start_event="" if cue_start_event is None else str(cue_start_event.get("event_name", "")),
+            source_end_event="" if imagery_start_event is None else str(imagery_start_event.get("event_name", "")),
+        )
+
+        imagery_end_event = _first_matching_event(events, trial_id=trial_id, event_names=["imagery_end"])
+        _append_segment(
+            segment_type="imagery",
+            start_sample=imagery_start,
+            end_sample=(
+                int(imagery_end_event["sample_index"])
+                if imagery_end_event is not None
+                else trial.imagery_offset_sample
+            ),
+            label=class_name,
+            trial_id=trial_id,
+            mi_run_index=mi_run_index,
+            run_trial_index=run_trial_index,
+            accepted=trial.accepted,
+            source_start_event="" if imagery_start_event is None else str(imagery_start_event.get("event_name", "")),
+            source_end_event="" if imagery_end_event is None else str(imagery_end_event.get("event_name", "")),
+        )
+
+        iti_start_event = _first_matching_event(events, trial_id=trial_id, event_names=["iti_start"])
+        _append_segment(
+            segment_type="iti",
+            start_sample=None if iti_start_event is None else int(iti_start_event["sample_index"]),
+            end_sample=trial_end,
+            label=class_name,
+            trial_id=trial_id,
+            mi_run_index=mi_run_index,
+            run_trial_index=run_trial_index,
+            accepted=trial.accepted,
+            source_start_event="" if iti_start_event is None else str(iti_start_event.get("event_name", "")),
+            source_end_event="" if trial_end_event is None else str(trial_end_event.get("event_name", "")),
+        )
+
+    interval_specs = [
+        ("quality_check", "quality_check", "quality_check_start", "quality_check_end", ""),
+        ("calibration", "calibration", "calibration_start", "calibration_end", ""),
+        ("practice", "practice", "practice_start", "practice_end", ""),
+        ("run_rest", "run_rest", "run_rest_start", "run_rest_end", ""),
+        ("eyes_open_rest", "eyes_open_rest", "eyes_open_rest_start", "eyes_open_rest_end", ""),
+        ("eyes_closed_rest", "eyes_closed_rest", "eyes_closed_rest_start", "eyes_closed_rest_end", ""),
+        ("idle_block", "idle_block", "idle_block_start", "idle_block_end", ""),
+        ("idle_prepare", "idle_prepare", "idle_prepare_start", "idle_prepare_end", ""),
+        ("continuous_block", "continuous_block", "continuous_block_start", "continuous_block_end", ""),
+    ]
+    for segment_type, label, start_name, end_name, default_label in interval_specs:
+        for start_event, end_event in _extract_event_pairs(events, start_name, end_name):
+            _append_segment(
+                segment_type=segment_type,
+                start_sample=start_event.get("sample_index"),
+                end_sample=end_event.get("sample_index"),
+                label=label or default_label,
+                mi_run_index=start_event.get("run_index"),
+                block_index=start_event.get("block_index"),
+                source_start_event=str(start_event.get("event_name", "")),
+                source_end_event=str(end_event.get("event_name", "")),
+            )
+
+    for artifact_type, (start_name, end_name) in ARTIFACT_EVENT_INTERVALS.items():
+        for start_event, end_event in _extract_event_pairs(events, start_name, end_name):
+            _append_segment(
+                segment_type="artifact_block",
+                start_sample=start_event.get("sample_index"),
+                end_sample=end_event.get("sample_index"),
+                label=artifact_type,
+                source_start_event=str(start_event.get("event_name", "")),
+                source_end_event=str(end_event.get("event_name", "")),
+            )
+
+    for prompt in _extract_continuous_prompts(events):
+        _append_segment(
+            segment_type="continuous_prompt",
+            start_sample=prompt.get("start_sample"),
+            end_sample=prompt.get("end_sample"),
+            label=str(prompt.get("class_label", "")),
+            block_index=prompt.get("block_index"),
+            prompt_index=prompt.get("prompt_index"),
+            execution_success=prompt.get("execution_success"),
+            source_start_event=CONTINUOUS_PROMPT_EVENT_NAMES.get(str(prompt.get("class_label", "")), "continuous_command"),
+            source_end_event="continuous_command_end",
+        )
+
+    return rows
 
 
 def _split_intervals_to_windows(
@@ -793,6 +1125,8 @@ def save_mi_session(
     eeg_rows: list[int],
     marker_row: int,
     timestamp_row: int | None,
+    package_num_row: int | None = None,
+    board_descr: dict[str, object] | None = None,
     settings: SessionSettings,
     event_log: list[dict[str, object]],
     trial_records: list[TrialRecord],
@@ -816,33 +1150,69 @@ def save_mi_session(
     recorded_markers = _extract_marker_occurrences(cropped_marker, crop_start=crop_start)
     enriched_events = _attach_sample_indices(event_log, recorded_markers)
     updated_trials = _update_trials_from_events(trial_records, enriched_events)
+    semantic_segment_rows = _build_segment_rows(enriched_events, updated_trials, sampling_rate=float(sampling_rate))
 
     session_dir = create_session_folder(settings.output_root, settings.subject_id, settings.session_id)
-    run_index = _next_run_index(session_dir)
+    dataset_root = Path(settings.output_root).resolve()
+    save_index = _next_save_index(session_dir)
     trial_count_total = int(len(updated_trials))
     accepted_count_total = int(sum(1 for trial in updated_trials if trial.accepted))
     rejected_count_total = int(trial_count_total - accepted_count_total)
     trials_per_run = int(settings.trials_per_class * len(MI_CLASSES))
     run_stem = _build_run_stem(
         settings=settings,
-        run_index=run_index,
+        save_index=save_index,
         trial_count=trial_count_total,
         accepted_count=accepted_count_total,
     )
     save_timestamp = datetime.now().isoformat(timespec="seconds")
 
+    board_data_path = session_dir / f"{run_stem}_board_data.npy"
+    board_map_path = session_dir / f"{run_stem}_board_map.json"
     fif_path = session_dir / f"{run_stem}_raw.fif"
     events_csv_path = session_dir / f"{run_stem}_events.csv"
     trials_csv_path = session_dir / f"{run_stem}_trials.csv"
+    segments_csv_path = session_dir / f"{run_stem}_segments.csv"
     meta_json_path = session_dir / f"{run_stem}_session_meta.json"
     quality_json_path = session_dir / f"{run_stem}_quality_report.json"
-    legacy_epochs_path = session_dir / f"{run_stem}_epochs.npz"
     mi_epochs_path = session_dir / f"{run_stem}_mi_epochs.npz"
     gate_epochs_path = session_dir / f"{run_stem}_gate_epochs.npz"
     artifact_epochs_path = session_dir / f"{run_stem}_artifact_epochs.npz"
     continuous_npz_path = session_dir / f"{run_stem}_continuous.npz"
-
+    mi_epochs_meta_path = mi_epochs_path.with_suffix(".meta.json")
+    gate_epochs_meta_path = gate_epochs_path.with_suffix(".meta.json")
+    artifact_epochs_meta_path = artifact_epochs_path.with_suffix(".meta.json")
+    continuous_meta_path = continuous_npz_path.with_suffix(".meta.json")
     channel_names = settings.channel_names
+
+    np.save(board_data_path, np.asarray(cropped, dtype=np.float32), allow_pickle=False)
+    board_map = {
+        "schema_version": int(COLLECTION_SCHEMA_VERSION),
+        "exporter_name": COLLECTION_EXPORTER_NAME,
+        "saved_at": save_timestamp,
+        "subject_id": sanitize_session_token(settings.subject_id),
+        "session_id": sanitize_session_token(settings.session_id),
+        "save_index": int(save_index),
+        "run_stem": run_stem,
+        "board_id": int(settings.board_id),
+        "board_name": str(settings.board_name or ""),
+        "board_descr": json.loads(json.dumps(board_descr or {}, ensure_ascii=False, default=str)),
+        "crop_start_sample": int(crop_start),
+        "crop_end_sample": int(crop_end),
+        "cropped_sample_count": int(cropped.shape[1]),
+        "row_count": int(cropped.shape[0]),
+        "selected_eeg_rows": [int(item) for item in eeg_rows],
+        "marker_row": int(marker_row),
+        "timestamp_row": None if timestamp_row is None else int(timestamp_row),
+        "package_num_row": None if package_num_row is None else int(package_num_row),
+        "channel_rows": [
+            {"channel_name": str(name), "board_row": int(row)}
+            for name, row in zip(channel_names, eeg_rows)
+        ],
+    }
+    _write_json(board_map_path, board_map)
+    board_data_sha256 = _compute_sha256(board_data_path)
+
     stim_channel = cropped_marker[np.newaxis, :]
     data_for_raw = np.vstack([eeg_volts, stim_channel])
     info = mne.create_info(
@@ -852,16 +1222,17 @@ def save_mi_session(
     )
     raw = mne.io.RawArray(data_for_raw, info, verbose=False)
     _maybe_set_standard_montage(raw, channel_names)
-    raw.set_annotations(_make_annotations(enriched_events, float(sampling_rate)))
+    raw.set_annotations(_make_annotations(enriched_events, float(sampling_rate), semantic_segment_rows))
     raw.save(fif_path, overwrite=True, verbose=False)
 
     event_rows = [
         {
             "event_index": index,
+            "save_index": int(save_index),
             "event_name": event["event_name"],
             "marker_code": event["marker_code"],
             "trial_id": event.get("trial_id"),
-            "run_index": event.get("run_index"),
+            "mi_run_index": event.get("run_index"),
             "run_trial_index": event.get("run_trial_index"),
             "block_index": event.get("block_index"),
             "prompt_index": event.get("prompt_index"),
@@ -880,10 +1251,11 @@ def save_mi_session(
         event_rows,
         [
             "event_index",
+            "save_index",
             "event_name",
             "marker_code",
             "trial_id",
-            "run_index",
+            "mi_run_index",
             "run_trial_index",
             "block_index",
             "prompt_index",
@@ -897,13 +1269,30 @@ def save_mi_session(
         ],
     )
 
-    trial_rows = [trial.to_row() for trial in updated_trials]
+    trial_rows = [
+        {
+            "trial_id": int(trial.trial_id),
+            "save_index": int(save_index),
+            "mi_run_index": int(trial.run_index),
+            "run_trial_index": int(trial.run_trial_index),
+            "class_name": str(trial.class_name),
+            "display_name": str(trial.display_name),
+            "accepted": int(trial.accepted),
+            "cue_onset_sample": trial.cue_onset_sample,
+            "imagery_onset_sample": trial.imagery_onset_sample,
+            "imagery_offset_sample": trial.imagery_offset_sample,
+            "trial_end_sample": trial.trial_end_sample,
+            "note": str(trial.note),
+        }
+        for trial in updated_trials
+    ]
     _write_csv(
         trials_csv_path,
         trial_rows,
         [
             "trial_id",
-            "run_index",
+            "save_index",
+            "mi_run_index",
             "run_trial_index",
             "class_name",
             "display_name",
@@ -915,10 +1304,32 @@ def save_mi_session(
             "note",
         ],
     )
+    segment_rows = [{"save_index": int(save_index), **row} for row in semantic_segment_rows]
+    _write_csv(
+        segments_csv_path,
+        segment_rows,
+        [
+            "segment_id",
+            "save_index",
+            "segment_type",
+            "label",
+            "start_sample",
+            "end_sample",
+            "duration_sec",
+            "trial_id",
+            "mi_run_index",
+            "run_trial_index",
+            "block_index",
+            "prompt_index",
+            "accepted",
+            "execution_success",
+            "source_start_event",
+            "source_end_event",
+        ],
+    )
 
     quality_summary = _build_quality_summary(eeg_uvolts, channel_names)
-    with quality_json_path.open("w", encoding="utf-8") as file:
-        json.dump(quality_summary, file, indent=2, ensure_ascii=False)
+    _write_json(quality_json_path, quality_summary)
 
     class_names = [item["key"] for item in MI_CLASSES]
     window_samples = max(1, int(round(float(settings.imagery_sec) * float(sampling_rate))))
@@ -1076,66 +1487,50 @@ def save_mi_session(
     continuous_event_labels = np.asarray([str(item["class_label"]) for item in continuous_prompts], dtype=object)
     continuous_event_samples = np.asarray([int(item["start_sample"]) for item in continuous_prompts], dtype=np.int64)
     continuous_event_end_samples = np.asarray([int(item["end_sample"]) for item in continuous_prompts], dtype=np.int64)
-    continuous_block_start_samples = np.asarray([int(item[0]) for item in continuous_block_intervals], dtype=np.int64)
-    continuous_block_end_samples = np.asarray([int(item[1]) for item in continuous_block_intervals], dtype=np.int64)
-    continuous_events_payload = np.asarray(
+    continuous_block_indices = np.asarray([int(item.get("block_index", 0)) for item in continuous_prompts], dtype=np.int32)
+    continuous_prompt_indices = np.asarray([int(item.get("prompt_index", 0)) for item in continuous_prompts], dtype=np.int32)
+    continuous_execution_success = np.asarray(
         [
-            json.dumps(
-                {
-                    "block_index": int(item.get("block_index", 0)),
-                    "prompt_index": int(item.get("prompt_index", 0)),
-                    "class_label": str(item.get("class_label", "")),
-                    "start_sample": int(item.get("start_sample", 0)),
-                    "end_sample": int(item.get("end_sample", 0)),
-                    "execution_success": item.get("execution_success"),
-                    "duration_sec": item.get("duration_sec"),
-                },
-                ensure_ascii=False,
-            )
+            -1 if item.get("execution_success") is None else int(bool(item.get("execution_success")))
             for item in continuous_prompts
         ],
-        dtype=object,
+        dtype=np.int8,
     )
+    continuous_command_durations = np.asarray(
+        [
+            np.nan if item.get("duration_sec") is None else float(item.get("duration_sec"))
+            for item in continuous_prompts
+        ],
+        dtype=np.float32,
+    )
+    continuous_block_start_samples = np.asarray([int(item[0]) for item in continuous_block_intervals], dtype=np.int64)
+    continuous_block_end_samples = np.asarray([int(item[1]) for item in continuous_block_intervals], dtype=np.int64)
 
     common_npz_payload = {
-        "class_names": np.asarray(class_names, dtype=object),
-        "channel_names": np.asarray(channel_names, dtype=object),
+        "schema_version": np.asarray([int(COLLECTION_SCHEMA_VERSION)], dtype=np.int32),
+        "class_names": _string_array(class_names),
+        "channel_names": _string_array(channel_names),
         "sampling_rate": np.asarray([float(sampling_rate)], dtype=np.float32),
-        "signal_unit": np.asarray(["volt"], dtype=object),
-        "subject_id": np.asarray([sanitize_session_token(settings.subject_id)], dtype=object),
-        "session_id": np.asarray([sanitize_session_token(settings.session_id)], dtype=object),
-        "run_index": np.asarray([int(run_index)], dtype=np.int32),
-        "run_stem": np.asarray([run_stem], dtype=object),
+        "signal_unit": _string_array(["volt"]),
+        "subject_id": _string_array([sanitize_session_token(settings.subject_id)]),
+        "session_id": _string_array([sanitize_session_token(settings.session_id)]),
+        "protocol_mode": _string_array([str(settings.protocol_mode or "full")]),
+        "save_index": np.asarray([int(save_index)], dtype=np.int32),
+        "run_stem": _string_array([run_stem]),
         "trials_per_class": np.asarray([int(settings.trials_per_class)], dtype=np.int32),
         "mi_run_count": np.asarray([int(settings.run_count)], dtype=np.int32),
         "trials_per_run": np.asarray([int(trials_per_run)], dtype=np.int32),
         "total_trials": np.asarray([int(trial_count_total)], dtype=np.int32),
         "accepted_trials": np.asarray([int(accepted_count_total)], dtype=np.int32),
         "rejected_trials": np.asarray([int(rejected_count_total)], dtype=np.int32),
-        "created_at": np.asarray([save_timestamp], dtype=object),
+        "created_at": _string_array([save_timestamp]),
     }
-
-    epochs_path = str(legacy_epochs_path) if settings.save_epochs_npz else ""
-    if settings.save_epochs_npz:
-        np.savez_compressed(
-            legacy_epochs_path,
-            X=np.asarray(X_mi, dtype=np.float32),
-            y=np.asarray(y_mi, dtype=np.int64),
-            accepted=np.ones(np.asarray(X_mi).shape[0], dtype=np.int8),
-            trial_ids=np.asarray(mi_trial_ids_array, dtype=np.int64),
-            X_baseline=np.asarray(X_baseline, dtype=np.float32),
-            X_iti=np.asarray(X_iti, dtype=np.float32),
-            **common_npz_payload,
-        )
 
     np.savez_compressed(
         mi_epochs_path,
         X_mi=np.asarray(X_mi, dtype=np.float32),
         y_mi=np.asarray(y_mi, dtype=np.int64),
         mi_trial_ids=np.asarray(mi_trial_ids_array, dtype=np.int64),
-        X=np.asarray(X_mi, dtype=np.float32),
-        y=np.asarray(y_mi, dtype=np.int64),
-        trial_ids=np.asarray(mi_trial_ids_array, dtype=np.int64),
         **common_npz_payload,
     )
     np.savez_compressed(
@@ -1143,37 +1538,142 @@ def save_mi_session(
         X_gate_pos=np.asarray(gate_positive, dtype=np.float32),
         X_gate_neg=np.asarray(X_gate_neg, dtype=np.float32),
         X_gate_hard_neg=np.asarray(X_gate_hard_neg, dtype=np.float32),
-        gate_neg_sources=np.asarray(gate_neg_sources_array, dtype=object),
-        gate_hard_neg_sources=np.asarray(gate_hard_neg_sources_array, dtype=object),
+        gate_neg_sources=_string_array(gate_neg_sources_array),
+        gate_hard_neg_sources=_string_array(gate_hard_neg_sources_array),
         **common_npz_payload,
     )
     np.savez_compressed(
         artifact_epochs_path,
         X_artifact=np.asarray(X_artifact, dtype=np.float32),
-        artifact_labels=np.asarray(artifact_labels, dtype=object),
+        artifact_labels=_string_array(artifact_labels),
         **common_npz_payload,
     )
     np.savez_compressed(
         continuous_npz_path,
         X_continuous=np.asarray(X_continuous, dtype=np.float32),
-        continuous_event_labels=np.asarray(continuous_event_labels, dtype=object),
+        continuous_event_labels=_string_array(continuous_event_labels),
         continuous_event_samples=np.asarray(continuous_event_samples, dtype=np.int64),
         continuous_event_end_samples=np.asarray(continuous_event_end_samples, dtype=np.int64),
+        continuous_block_indices=np.asarray(continuous_block_indices, dtype=np.int32),
+        continuous_prompt_indices=np.asarray(continuous_prompt_indices, dtype=np.int32),
+        continuous_execution_success=np.asarray(continuous_execution_success, dtype=np.int8),
+        continuous_command_duration_sec=np.asarray(continuous_command_durations, dtype=np.float32),
         continuous_block_start_samples=np.asarray(continuous_block_start_samples, dtype=np.int64),
         continuous_block_end_samples=np.asarray(continuous_block_end_samples, dtype=np.int64),
-        continuous_events=np.asarray(continuous_events_payload, dtype=object),
         **common_npz_payload,
+    )
+
+    files_rel = {
+        "board_data_npy": _relative_path(board_data_path, dataset_root),
+        "board_map_json": _relative_path(board_map_path, dataset_root),
+        "session_raw_fif": _relative_path(fif_path, dataset_root),
+        "events_csv": _relative_path(events_csv_path, dataset_root),
+        "trials_csv": _relative_path(trials_csv_path, dataset_root),
+        "segments_csv": _relative_path(segments_csv_path, dataset_root),
+        "session_meta_json": _relative_path(meta_json_path, dataset_root),
+        "quality_report_json": _relative_path(quality_json_path, dataset_root),
+        "mi_epochs_npz": _relative_path(mi_epochs_path, dataset_root),
+        "mi_epochs_meta_json": _relative_path(mi_epochs_meta_path, dataset_root),
+        "gate_epochs_npz": _relative_path(gate_epochs_path, dataset_root),
+        "gate_epochs_meta_json": _relative_path(gate_epochs_meta_path, dataset_root),
+        "artifact_epochs_npz": _relative_path(artifact_epochs_path, dataset_root),
+        "artifact_epochs_meta_json": _relative_path(artifact_epochs_meta_path, dataset_root),
+        "continuous_npz": _relative_path(continuous_npz_path, dataset_root),
+        "continuous_meta_json": _relative_path(continuous_meta_path, dataset_root),
+    }
+
+    derivation_common = {
+        "schema_version": int(COLLECTION_SCHEMA_VERSION),
+        "exporter_name": COLLECTION_EXPORTER_NAME,
+        "created_at": save_timestamp,
+        "source_run_stem": run_stem,
+        "source_save_index": int(save_index),
+        "source_sha256": board_data_sha256,
+        "source_files": {
+            "board_data_npy": files_rel["board_data_npy"],
+            "events_csv": files_rel["events_csv"],
+            "trials_csv": files_rel["trials_csv"],
+            "segments_csv": files_rel["segments_csv"],
+        },
+        "subject_id": sanitize_session_token(settings.subject_id),
+        "session_id": sanitize_session_token(settings.session_id),
+        "protocol_mode": str(settings.protocol_mode or "full"),
+    }
+    _write_json(
+        mi_epochs_meta_path,
+        {
+            **derivation_common,
+            "derivation_name": "mi_epochs",
+            "derivation_policy": {
+                "window_sec": float(settings.imagery_sec),
+                "source_segment": "imagery",
+                "accepted_trials_only": True,
+            },
+        },
+    )
+    _write_json(
+        gate_epochs_meta_path,
+        {
+            **derivation_common,
+            "derivation_name": "gate_epochs",
+            "derivation_policy": {
+                "positive_source": "accepted_imagery",
+                "negative_sources": sorted(set(str(item) for item in gate_negative_sources)),
+                "hard_negative_sources": sorted(set(str(item) for item in hard_negative_sources)),
+                "window_sec": float(settings.imagery_sec),
+                "step_sec": float(rest_step_samples / float(sampling_rate)),
+            },
+        },
+    )
+    _write_json(
+        artifact_epochs_meta_path,
+        {
+            **derivation_common,
+            "derivation_name": "artifact_epochs",
+            "derivation_policy": {
+                "artifact_types": [str(item) for item in normalize_artifact_types(settings.artifact_types)],
+                "window_sec": float(settings.imagery_sec),
+                "step_sec": float(rest_step_samples / float(sampling_rate)),
+            },
+        },
+    )
+    _write_json(
+        continuous_meta_path,
+        {
+            **derivation_common,
+            "derivation_name": "continuous",
+            "derivation_policy": {
+                "contains_blocks": True,
+                "contains_prompt_metadata": True,
+                "stores_execution_success": True,
+            },
+        },
     )
 
     session_payload = asdict(settings)
     session_payload.pop("operator", None)
+    session_payload["output_root"] = "."
     meta = {
+        "schema_version": int(COLLECTION_SCHEMA_VERSION),
+        "exporter_name": COLLECTION_EXPORTER_NAME,
         "saved_at": save_timestamp,
+        "task_name": "motor_imagery",
+        "subject_id": sanitize_session_token(settings.subject_id),
+        "session_id": sanitize_session_token(settings.session_id),
+        "protocol_mode": str(settings.protocol_mode or "full"),
+        "save_index": int(save_index),
+        "run_stem": run_stem,
         "session": session_payload,
         "sampling_rate_hz": float(sampling_rate),
+        "recording_type": "continuous",
+        "power_line_frequency_hz": None,
+        "eeg_reference": str(settings.reference_mode or ""),
+        "eeg_ground": "",
+        "preview_filter_applied_to_saved_signal": False,
         "selected_eeg_rows": [int(item) for item in eeg_rows],
         "marker_row": int(marker_row),
         "timestamp_row": None if timestamp_row is None else int(timestamp_row),
+        "package_num_row": None if package_num_row is None else int(package_num_row),
         "sample_count": int(eeg_uvolts.shape[1]),
         "duration_sec": float(eeg_uvolts.shape[1] / float(sampling_rate)),
         "brainflow_eeg_unit": "microvolt",
@@ -1181,8 +1681,7 @@ def save_mi_session(
         "epochs_unit": "volt",
         "quality_report": quality_summary,
         "event_count": len(enriched_events),
-        "run_index": int(run_index),
-        "run_stem": run_stem,
+        "segment_count": int(len(segment_rows)),
         "trials_per_run": int(trials_per_run),
         "mi_run_count": int(settings.run_count),
         "trial_count": trial_count_total,
@@ -1195,38 +1694,30 @@ def save_mi_session(
         "artifact_segments": int(X_artifact.shape[0]),
         "continuous_blocks": int(X_continuous.shape[0]),
         "continuous_prompts": int(continuous_event_labels.shape[0]),
+        "raw_preservation_level": "cropped_full_board_matrix",
+        "board_data_sha256": board_data_sha256,
+        "source_alignment_policy": "strict_marker_sequence_1_to_1",
         "session_start_wall_time": event_log[0]["iso_time"] if event_log else "",
         "session_end_wall_time": event_log[-1]["iso_time"] if event_log else "",
         "first_board_timestamp": None if cropped_timestamps is None or cropped_timestamps.size == 0 else float(cropped_timestamps[0]),
         "last_board_timestamp": None if cropped_timestamps is None or cropped_timestamps.size == 0 else float(cropped_timestamps[-1]),
-        "files": {
-            "session_raw_fif": str(fif_path),
-            "events_csv": str(events_csv_path),
-            "trials_csv": str(trials_csv_path),
-            "session_meta_json": str(meta_json_path),
-            "quality_report_json": str(quality_json_path),
-            "legacy_epochs_npz": epochs_path,
-            "mi_epochs_npz": str(mi_epochs_path),
-            "gate_epochs_npz": str(gate_epochs_path),
-            "artifact_epochs_npz": str(artifact_epochs_path),
-            "continuous_npz": str(continuous_npz_path),
-        },
+        "files": files_rel,
     }
-    with meta_json_path.open("w", encoding="utf-8") as file:
-        json.dump(meta, file, indent=2, ensure_ascii=False)
+    _write_json(meta_json_path, meta)
 
     # Keep one lightweight pointer for "latest run" convenience.
     latest_meta_path = session_dir / "session_meta_latest.json"
-    with latest_meta_path.open("w", encoding="utf-8") as file:
-        json.dump(meta, file, indent=2, ensure_ascii=False)
+    _write_json(latest_meta_path, meta)
 
     manifest_path = _append_collection_manifest(
         settings.output_root,
         {
             "saved_at": save_timestamp,
+            "schema_version": int(COLLECTION_SCHEMA_VERSION),
             "subject_id": sanitize_session_token(settings.subject_id),
             "session_id": sanitize_session_token(settings.session_id),
-            "run_index": int(run_index),
+            "protocol_mode": str(settings.protocol_mode or "full"),
+            "save_index": int(save_index),
             "run_stem": run_stem,
             "trials_per_class": int(settings.trials_per_class),
             "mi_run_count": int(settings.run_count),
@@ -1237,31 +1728,40 @@ def save_mi_session(
             "sampling_rate_hz": float(sampling_rate),
             "channel_names": ",".join(channel_names),
             "class_names": ",".join(class_names),
-            "mi_epochs_npz": str(mi_epochs_path),
-            "gate_epochs_npz": str(gate_epochs_path),
-            "artifact_epochs_npz": str(artifact_epochs_path),
-            "continuous_npz": str(continuous_npz_path),
-            "epochs_npz": epochs_path,
-            "session_raw_fif": str(fif_path),
-            "events_csv": str(events_csv_path),
-            "trials_csv": str(trials_csv_path),
-            "session_meta_json": str(meta_json_path),
+            "board_data_npy": files_rel["board_data_npy"],
+            "board_map_json": files_rel["board_map_json"],
+            "mi_epochs_npz": files_rel["mi_epochs_npz"],
+            "mi_epochs_meta_json": files_rel["mi_epochs_meta_json"],
+            "gate_epochs_npz": files_rel["gate_epochs_npz"],
+            "gate_epochs_meta_json": files_rel["gate_epochs_meta_json"],
+            "artifact_epochs_npz": files_rel["artifact_epochs_npz"],
+            "artifact_epochs_meta_json": files_rel["artifact_epochs_meta_json"],
+            "continuous_npz": files_rel["continuous_npz"],
+            "continuous_meta_json": files_rel["continuous_meta_json"],
+            "session_raw_fif": files_rel["session_raw_fif"],
+            "events_csv": files_rel["events_csv"],
+            "trials_csv": files_rel["trials_csv"],
+            "segments_csv": files_rel["segments_csv"],
+            "session_meta_json": files_rel["session_meta_json"],
+            "quality_report_json": files_rel["quality_report_json"],
         },
     )
 
     return {
         "session_dir": str(session_dir),
+        "board_data_path": str(board_data_path),
+        "board_map_path": str(board_map_path),
         "fif_path": str(fif_path),
         "trials_csv_path": str(trials_csv_path),
         "events_csv_path": str(events_csv_path),
+        "segments_csv_path": str(segments_csv_path),
         "meta_json_path": str(meta_json_path),
         "quality_json_path": str(quality_json_path),
-        "epochs_path": epochs_path,
         "mi_epochs_path": str(mi_epochs_path),
         "gate_epochs_path": str(gate_epochs_path),
         "artifact_epochs_path": str(artifact_epochs_path),
         "continuous_path": str(continuous_npz_path),
-        "run_index": int(run_index),
+        "save_index": int(save_index),
         "run_stem": run_stem,
         "trial_count": trial_count_total,
         "accepted_trial_count": accepted_count_total,

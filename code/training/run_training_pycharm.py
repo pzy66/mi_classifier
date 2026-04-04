@@ -42,8 +42,7 @@ def main() -> int:
             "Training Failed",
             f"{error}\n\n"
             "Please ensure datasets/custom_mi contains collected task files "
-            "(*_mi_epochs.npz/*_gate_epochs.npz/*_artifact_epochs.npz/*_continuous.npz) "
-            "or legacy *_epochs.npz files.",
+            "(*_mi_epochs.npz/*_gate_epochs.npz/*_artifact_epochs.npz/*_continuous.npz).",
         )
         return 1
 

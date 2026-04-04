@@ -1,0 +1,2 @@
+﻿trial_id,save_index,mi_run_index,run_trial_index,class_name,display_name,accepted,cue_onset_sample,imagery_onset_sample,imagery_offset_sample,trial_end_sample,note
+1,1,1,1,feet,双脚想象,0,511,793,1183,1184,当前会话手动提前结束

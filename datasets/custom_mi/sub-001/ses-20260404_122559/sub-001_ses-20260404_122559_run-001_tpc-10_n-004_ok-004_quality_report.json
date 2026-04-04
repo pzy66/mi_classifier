@@ -1,0 +1,54 @@
+{
+  "overall_std_uV": 118064.8984375,
+  "overall_peak_to_peak_uV": 325780.8125,
+  "channels": [
+    {
+      "channel_name": "C3",
+      "std_uV": 851.6139526367188,
+      "peak_to_peak_uV": 3623.9375,
+      "rms_uV": 173820.3125
+    },
+    {
+      "channel_name": "Cz",
+      "std_uV": 1991.6474609375,
+      "peak_to_peak_uV": 8697.5078125,
+      "rms_uV": 124515.7578125
+    },
+    {
+      "channel_name": "C4",
+      "std_uV": 4462.982421875,
+      "peak_to_peak_uV": 16360.470703125,
+      "rms_uV": 5347.02587890625
+    },
+    {
+      "channel_name": "PO3",
+      "std_uV": 4060.18994140625,
+      "peak_to_peak_uV": 14507.779296875,
+      "rms_uV": 28147.974609375
+    },
+    {
+      "channel_name": "PO4",
+      "std_uV": 358.12615966796875,
+      "peak_to_peak_uV": 1415.421875,
+      "rms_uV": 149119.4375
+    },
+    {
+      "channel_name": "O1",
+      "std_uV": 2710.191650390625,
+      "peak_to_peak_uV": 9765.59375,
+      "rms_uV": 138044.5625
+    },
+    {
+      "channel_name": "Oz",
+      "std_uV": 6676.3056640625,
+      "peak_to_peak_uV": 22133.96875,
+      "rms_uV": 119597.3984375
+    },
+    {
+      "channel_name": "O2",
+      "std_uV": 14343.458984375,
+      "peak_to_peak_uV": 45066.578125,
+      "rms_uV": 135446.3125
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+﻿event_index,save_index,event_name,marker_code,trial_id,mi_run_index,run_trial_index,block_index,prompt_index,class_name,command_duration_sec,execution_success,sample_index,absolute_sample_index,elapsed_sec,iso_time
+0,1,session_start,100,,,,,,,,,0,14,,2026-04-03T13:31:09.195
+1,1,trial_start,200,1,,,,,left_hand,,,45,59,,2026-04-03T13:31:09.295
+2,1,baseline_start,110,1,,,,,left_hand,,,60,74,,2026-04-03T13:31:09.360
+3,1,baseline_end,111,1,,,,,left_hand,,,255,269,,2026-04-03T13:31:10.164
+4,1,cue_left_hand,301,1,,,,,left_hand,,,256,270,,2026-04-03T13:31:10.185
+5,1,imagery_left_hand,311,1,,,,,left_hand,,,384,398,,2026-04-03T13:31:10.690
+6,1,imagery_end,320,1,,,,,left_hand,,,644,658,,2026-04-03T13:31:11.694
+7,1,iti_start,330,1,,,,,left_hand,,,645,659,,2026-04-03T13:31:11.718
+8,1,trial_end,210,1,,,,,left_hand,,,809,823,,2026-04-03T13:31:12.521
+9,1,session_end,101,,,,,,,,,810,824,,2026-04-03T13:31:12.572

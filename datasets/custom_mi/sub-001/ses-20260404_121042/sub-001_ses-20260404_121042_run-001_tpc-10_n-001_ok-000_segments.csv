@@ -1,0 +1,5 @@
+﻿segment_id,save_index,segment_type,label,start_sample,end_sample,duration_sec,trial_id,mi_run_index,run_trial_index,block_index,prompt_index,accepted,execution_success,source_start_event,source_end_event
+1,1,trial,feet,2,1184,4.728,1,1,1,,,0,,trial_start,trial_end
+2,1,baseline,feet,3,510,2.028,1,1,1,,,0,,fixation_start,baseline_end
+3,1,cue,feet,511,793,1.128,1,1,1,,,0,,cue_start,imagery_start
+4,1,imagery,feet,793,1183,1.56,1,1,1,,,0,,imagery_start,imagery_end

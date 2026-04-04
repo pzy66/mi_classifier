@@ -7,7 +7,7 @@ runtime modes:
   the evidence does not pass the decision thresholds.
 - ``guided``: run a cue-aligned baseline -> cue -> imagery -> recovery loop
   so online timing matches collection and training more closely (defaults:
-  baseline/cue/imagery/iti = 2.0/1.0/4.0/2.0s).
+  baseline/cue/imagery/iti = 2.0/2.0/4.0/2.0s).
 """
 
 from __future__ import annotations
@@ -75,7 +75,7 @@ USER_CONFIG = {
     "artifact_freeze_windows": 2,
     "board_channel_positions": None,
     "protocol_baseline_sec": 2.0,
-    "protocol_cue_sec": 1.0,
+    "protocol_cue_sec": 2.0,
     "protocol_imagery_sec": 4.0,
     "protocol_iti_sec": 2.0,
     "protocol_trials_per_class": 4,
@@ -794,7 +794,7 @@ class MIRealtimeWindow(QMainWindow):
             return (
                 "Guided MI session (test protocol). Classification only runs during imagery. "
                 f"Current timing baseline/cue/imagery/iti={baseline_sec:.1f}/{cue_sec:.1f}/{imagery_sec:.1f}/{iti_sec:.1f}s "
-                "(collection-aligned default is 2.0/1.0/4.0/2.0s)."
+                "(collection-aligned default is 2.0/2.0/4.0/2.0s)."
             )
         return (
             "Continuous MI recognition. The classifier scores every rolling window and stays UNCERTAIN "
