@@ -69,7 +69,7 @@ from src.mi_collection import (
     parse_channel_positions,
     save_mi_session,
 )
-from src.serial_ports import detect_serial_ports
+from src.serial_ports import describe_serial_port, detect_serial_ports
 
 
 DEFAULT_CHANNEL_NAMES = ["C3", "Cz", "C4", "PO3", "PO4", "O1", "Oz", "O2"]
@@ -169,7 +169,7 @@ CLASS_UI_IMAGERY_HINTS = {
 }
 
 DEFAULT_CONFIG = {
-    "serial_port": "COM3",
+    "serial_port": "",
     "board_id": BoardIds.CYTON_BOARD.value,
     "subject_id": "001",
     "session_id": datetime.now().strftime("%Y%m%d_%H%M%S"),
@@ -1261,6 +1261,25 @@ class BoardCaptureWorker(QObject):
                 "reset_default": bool(reset_default),
             }
 
+    def _build_connection_error_message(self, error: Exception) -> str:
+        base_message = f"设备采集线程出错：{error}"
+        serial_port = str(self.serial_port or "").strip()
+        error_text = str(error)
+        if not serial_port:
+            return base_message
+        if "UNABLE_TO_OPEN_PORT_ERROR" not in error_text and "unable to prepare streaming session" not in error_text.lower():
+            return base_message
+
+        diagnostics = describe_serial_port(serial_port)
+        detected_ports = [str(item) for item in diagnostics.get("detected_ports", []) if str(item).strip()]
+        windows_status = str(diagnostics.get("windows_status", "")).strip()
+        detail_parts = [f"无法打开串口 {serial_port}。"]
+        if windows_status:
+            detail_parts.append(f"Windows Ports 状态：{windows_status}。")
+        detail_parts.append("当前检测到的可用串口：" + (", ".join(detected_ports) if detected_ports else "无") + "。")
+        detail_parts.append("请确认设备已通电、数据线支持数据传输、串口未被其他程序占用，然后点击“刷新串口”后重试。")
+        return base_message + "\n" + "".join(detail_parts)
+
     @pyqtSlot()
     def run(self) -> None:
         final_payload = None
@@ -1358,7 +1377,7 @@ class BoardCaptureWorker(QObject):
                         if preview_chunk is not None and preview_chunk.size:
                             self.preview_data_ready.emit(preview_chunk)
         except Exception as error:
-            self.error_occurred.emit(f"设备采集线程出错：{error}")
+            self.error_occurred.emit(self._build_connection_error_message(error))
         finally:
             if self.board is not None:
                 try:
@@ -3203,7 +3222,7 @@ class MIDataCollectorWindow(QMainWindow):
         elif ports:
             self.serial_combo.setCurrentIndex(0)
         else:
-            self.serial_combo.setCurrentText("COM3")
+            self.serial_combo.setCurrentText("")
         self.serial_combo.blockSignals(False)
 
     def refresh_board_input_state(self) -> None:
@@ -3261,6 +3280,18 @@ class MIDataCollectorWindow(QMainWindow):
         is_synthetic = synthetic is not None and int(board_id) == int(synthetic.value)
         if not is_synthetic and not serial_port:
             raise ValueError("当前板卡需要串口，请先选择有效串口。")
+        if not is_synthetic:
+            available_ports = [str(item).strip().upper() for item in detect_serial_ports()]
+            selected_port = str(serial_port).strip().upper()
+            if not available_ports:
+                raise ValueError(
+                    "当前没有检测到可用串口。请确认设备已通电、数据线已插稳，并点击“刷新串口”后重试。"
+                )
+            if selected_port not in available_ports:
+                raise ValueError(
+                    f"当前串口 {serial_port} 不在可用设备列表中。"
+                    f"已检测到：{', '.join(available_ports)}。请刷新串口并确认设备实际连接到正确端口。"
+                )
 
         output_root = self.output_edit.text().strip() or str(PROJECT_ROOT / "datasets" / "custom_mi")
         try:

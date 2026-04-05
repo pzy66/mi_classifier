@@ -34,8 +34,18 @@ Status:                     Problem
 
     @patch("src.serial_ports.os.name", "nt")
     @patch("src.serial_ports._detect_windows_pnp_ports", return_value=[("COM4", "Disconnected"), ("COM3", "Problem")])
-    @patch("src.serial_ports._detect_pyserial_ports", return_value=["COM3"])
-    def test_detect_serial_ports_filters_problem_ports_from_windows_inventory(
+    @patch("src.serial_ports._detect_pyserial_ports", return_value=["COM3", "COM4"])
+    def test_detect_serial_ports_filters_unavailable_ports_from_windows_inventory(
+        self,
+        _mock_pyserial,
+        _mock_windows_ports,
+    ) -> None:
+        self.assertEqual(detect_serial_ports(), [])
+
+    @patch("src.serial_ports.os.name", "nt")
+    @patch("src.serial_ports._detect_windows_pnp_ports", return_value=[("COM4", "OK")])
+    @patch("src.serial_ports._detect_pyserial_ports", return_value=["COM4"])
+    def test_detect_serial_ports_keeps_healthy_windows_ports(
         self,
         _mock_pyserial,
         _mock_windows_ports,

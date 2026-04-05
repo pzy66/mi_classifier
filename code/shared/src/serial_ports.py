@@ -8,7 +8,7 @@ import subprocess
 
 
 _COM_PORT_PATTERN = re.compile(r"\bCOM\d+\b", flags=re.IGNORECASE)
-_WINDOWS_PROBLEM_STATUSES = {"error", "problem"}
+_WINDOWS_UNAVAILABLE_STATUSES = {"error", "problem", "disconnected", "unknown", "not present", "notpresent"}
 
 
 def _dedupe_keep_order(items: list[str]) -> list[str]:
@@ -79,19 +79,34 @@ def detect_serial_ports(*, fallback_limit: int = 20) -> list[str]:
             merged: list[str] = []
 
             for port in pyserial_ports:
-                if status_by_port.get(port, "") in _WINDOWS_PROBLEM_STATUSES:
+                if status_by_port.get(port, "") in _WINDOWS_UNAVAILABLE_STATUSES:
                     continue
                 merged.append(port)
 
             for port, status in windows_ports:
-                if status.strip().lower() in _WINDOWS_PROBLEM_STATUSES:
+                if status.strip().lower() in _WINDOWS_UNAVAILABLE_STATUSES:
                     continue
                 merged.append(port)
 
             merged = _dedupe_keep_order(merged)
-            if merged:
-                return merged
+            return merged
 
     if pyserial_ports:
         return pyserial_ports
     return [f"COM{i}" for i in range(1, int(fallback_limit) + 1)]
+
+
+def describe_serial_port(port: str) -> dict[str, object]:
+    """Return a lightweight diagnostic snapshot for one serial port."""
+    normalized = str(port).strip().upper()
+    windows_status = ""
+    if os.name == "nt" and normalized:
+        for candidate_port, status in _detect_windows_pnp_ports():
+            if str(candidate_port).strip().upper() == normalized:
+                windows_status = str(status).strip()
+                break
+    return {
+        "requested_port": normalized,
+        "detected_ports": detect_serial_ports(),
+        "windows_status": windows_status,
+    }
