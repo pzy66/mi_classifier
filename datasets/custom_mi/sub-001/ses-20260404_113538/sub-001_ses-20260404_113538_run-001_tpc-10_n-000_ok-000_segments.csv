@@ -1,4 +1,0 @@
-﻿segment_id,save_index,segment_type,label,start_sample,end_sample,duration_sec,trial_id,mi_run_index,run_trial_index,block_index,prompt_index,accepted,execution_success,source_start_event,source_end_event
-1,1,calibration,calibration,1,16266,65.06,,,,,,,,calibration_start,calibration_end
-2,1,eyes_open_rest,eyes_open_rest,2,14992,59.96,,,,,,,,eyes_open_rest_start,eyes_open_rest_end
-3,1,eyes_closed_rest,eyes_closed_rest,14993,16265,5.088,,,,,,,,eyes_closed_rest_start,eyes_closed_rest_end

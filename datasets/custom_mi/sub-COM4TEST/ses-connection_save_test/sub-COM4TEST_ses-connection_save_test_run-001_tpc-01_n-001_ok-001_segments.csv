@@ -1,6 +1,0 @@
-﻿segment_id,save_index,segment_type,label,start_sample,end_sample,duration_sec,trial_id,mi_run_index,run_trial_index,block_index,prompt_index,accepted,execution_success,source_start_event,source_end_event
-1,1,trial,left_hand,45,809,3.056,1,1,1,,,1,,trial_start,trial_end
-2,1,baseline,left_hand,60,255,0.78,1,1,1,,,1,,baseline_start,baseline_end
-3,1,cue,left_hand,256,384,0.512,1,1,1,,,1,,cue_left_hand,imagery_left_hand
-4,1,imagery,left_hand,384,644,1.04,1,1,1,,,1,,imagery_left_hand,imagery_end
-5,1,iti,left_hand,645,809,0.656,1,1,1,,,1,,iti_start,trial_end

@@ -1,5 +1,0 @@
-﻿trial_id,save_index,mi_run_index,run_trial_index,class_name,display_name,accepted,cue_onset_sample,imagery_onset_sample,imagery_offset_sample,trial_end_sample,note
-1,1,1,1,tongue,舌头想象,1,538,1031,2064,2588,
-2,1,1,2,right_hand,右手想象,1,3113,3621,4639,5163,
-3,1,1,3,feet,双脚想象,1,5674,6211,7214,7737,
-4,1,1,4,left_hand,左手想象,1,8262,8785,9788,10207,

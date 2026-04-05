@@ -33,6 +33,12 @@ python run_05_channel_monitor.py
 
 发生回退时，界面会弹 warning。
 
+兼容性说明：
+
+- 运行时会对旧版 realtime artifact 做内存内兼容补齐，自动补回缺失的 `epoch_window` / `window_offset_sec` / `window_offset_secs_used`
+- 如果工件缺少更关键的字段，仍会拒绝启动并提示重新导出模型
+- Windows 下串口下拉会额外读取系统 Ports 设备清单，尽量避开 `Problem/Error` 的坏端口条目
+
 ## 3. 实时模式
 
 `USER_CONFIG['realtime_mode']` 支持：
@@ -87,15 +93,18 @@ guided 默认协议参数：
 非 `SYNTHETIC_BOARD` 时：
 
 1. `serial_port` 不能为空
-2. 必须显式设置 `board_channel_positions`
-3. `board_channel_positions` 长度必须等于模型通道数
-4. 位置索引不能重复，不能为负，不能超过板卡 EEG 行数
+2. 如果板卡 EEG 行数和模型通道数完全一致，程序会自动把 `board_channel_positions` 解析成顺序映射
+3. 如果两者不一致，必须显式设置 `board_channel_positions`
+4. `board_channel_positions` 长度必须等于模型通道数
+5. 位置索引不能重复，不能为负，不能超过板卡 EEG 行数
 
 ## 7. 常见问题
 
 ### 7.1 启动时报 `board_channel_positions` 错误
 
-先按训练通道顺序配置显式索引，例如：
+如果是标准 Cyton 8 通道且模型也是 8 通道，现在可以留空让程序自动映射。
+
+如果板卡通道数和模型通道数不一致，再按训练通道顺序配置显式索引，例如：
 
 ```python
 "board_channel_positions": [0, 1, 2, 3, 4, 5, 6, 7]

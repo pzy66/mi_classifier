@@ -7,6 +7,7 @@ from datetime import datetime
 import sys
 import threading
 from typing import Any
+from pathlib import Path
 
 import numpy as np
 from brainflow.board_shim import BoardIds, BoardShim, BrainFlowInputParams
@@ -32,6 +33,14 @@ from PyQt5.QtWidgets import (
 )
 
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+SHARED_ROOT = PROJECT_ROOT / "code" / "shared"
+if str(SHARED_ROOT) not in sys.path:
+    sys.path.insert(0, str(SHARED_ROOT))
+
+from src.serial_ports import detect_serial_ports  # noqa: E402
+
+
 DEFAULT_BOARD_ID = 0
 DEFAULT_SERIAL_PORT = "COM4"
 DEFAULT_WINDOW_SEC = 3.0
@@ -39,25 +48,6 @@ DEFAULT_POLL_SEC = 0.08
 DEFAULT_SCALE_UV = 150.0
 DEFAULT_CHANNEL_NAMES = [f"CH{i + 1}" for i in range(8)]
 IMPEDANCE_SUPPORTED_BOARD_IDS = {0, 2}
-
-
-def detect_serial_ports() -> list[str]:
-    """Detect serial ports, fallback to COM1..COM20."""
-    try:
-        from serial.tools import list_ports
-
-        devices = sorted(
-            {
-                str(port.device).strip()
-                for port in list_ports.comports()
-                if str(port.device).strip()
-            }
-        )
-        if devices:
-            return devices
-    except Exception:
-        pass
-    return [f"COM{i}" for i in range(1, 21)]
 
 
 def board_options() -> list[tuple[str, int]]:

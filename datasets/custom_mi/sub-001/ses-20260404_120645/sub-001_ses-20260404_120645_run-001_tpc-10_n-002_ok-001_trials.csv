@@ -1,3 +1,0 @@
-﻿trial_id,save_index,mi_run_index,run_trial_index,class_name,display_name,accepted,cue_onset_sample,imagery_onset_sample,imagery_offset_sample,trial_end_sample,note
-1,1,1,1,tongue,舌头想象,1,525,793,1811,2335,
-2,1,1,2,left_hand,左手想象,0,2815,3114,3219,3220,当前会话手动提前结束

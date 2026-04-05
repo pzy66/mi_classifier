@@ -1,3 +1,6 @@
 brainflow
 PyQt5
 pyserial
+joblib
+scikit-learn
+pyriemann

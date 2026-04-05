@@ -1,9 +1,0 @@
-﻿event_index,save_index,event_name,marker_code,trial_id,mi_run_index,run_trial_index,block_index,prompt_index,class_name,command_duration_sec,execution_success,sample_index,absolute_sample_index,elapsed_sec,iso_time
-0,1,session_start,100,,,,,,,,,0,11332,0.0046030000085011125,2026-04-04T11:36:38.592
-1,1,calibration_start,150,,,,,,,,,1,11333,0.004925000001094304,2026-04-04T11:36:38.592
-2,1,eyes_open_rest_start,160,,,,,,,,,2,11334,0.004945900000166148,2026-04-04T11:36:38.592
-3,1,eyes_open_rest_end,161,,,,,,,,,14992,26324,60.05070550000528,2026-04-04T11:37:38.647
-4,1,eyes_closed_rest_start,162,,,,,,,,,14993,26325,60.05075819999911,2026-04-04T11:37:38.647
-5,1,eyes_closed_rest_end,163,,,,,,,,,16265,27597,65.21230320000905,2026-04-04T11:37:43.808
-6,1,calibration_end,151,,,,,,,,,16266,27598,65.21236460001091,2026-04-04T11:37:43.808
-7,1,session_end,101,,,,,,,,,16267,27599,65.21238480000466,2026-04-04T11:37:43.808

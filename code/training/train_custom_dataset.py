@@ -98,15 +98,15 @@ STRICT_AUX_SPLIT_STRATEGIES = {"group_shuffle", "session_holdout", "aligned_to_m
 DEFAULT_SELECTION_OBJECTIVE_SPEC = {
     "name": "offline_plus_continuous_weighted",
     "components": {
-        "bank_kappa": {"weight": 0.35, "direction": "maximize"},
-        "bank_macro_f1": {"weight": 0.25, "direction": "maximize"},
+        "selection_val_kappa": {"weight": 0.35, "direction": "maximize"},
+        "selection_val_macro_f1": {"weight": 0.25, "direction": "maximize"},
         "continuous_mi_prompt_accuracy": {"weight": 0.25, "direction": "maximize"},
         "continuous_no_control_specificity": {"weight": 0.15, "direction": "maximize"},
     },
     "continuous_no_control_specificity_formula": "1 - no_control_false_activation_rate",
     "fallback_when_no_continuous": {
-        "bank_kappa": {"weight": 0.60, "direction": "maximize"},
-        "bank_macro_f1": {"weight": 0.40, "direction": "maximize"},
+        "selection_val_kappa": {"weight": 0.60, "direction": "maximize"},
+        "selection_val_macro_f1": {"weight": 0.40, "direction": "maximize"},
     },
 }
 RUN_STEM_PATTERN = re.compile(
@@ -824,13 +824,6 @@ def load_custom_task_datasets(dataset_root: Path, subject_filter: str | None = N
                     else gate_hard_neg_sources
                 )
 
-        if gate_neg.ndim == 3 and gate_neg.shape[0] > 0:
-            gate_neg, gate_neg_sources, dropped_continuous = _exclude_continuous_sourced_segments(
-                gate_neg,
-                gate_neg_sources,
-            )
-            file_record["gate_neg_dropped_continuous"] = int(dropped_continuous)
-
         if artifact_path is not None:
             with np.load(artifact_path, allow_pickle=False) as data:
                 signal_unit = _load_npz_text(data, "signal_unit", "volt")
@@ -1219,6 +1212,7 @@ def load_custom_task_datasets(dataset_root: Path, subject_filter: str | None = N
             "X_pos": np.asarray(X_gate_pos, dtype=np.float32),
             "X_neg": np.asarray(X_gate_neg, dtype=np.float32),
             "X_hard_neg": np.asarray(X_gate_hard_neg, dtype=np.float32),
+            "records": gate_payloads,
             "pos_groups": np.asarray(gate_pos_groups, dtype=object),
             "neg_groups": np.asarray(gate_neg_groups, dtype=object),
             "hard_neg_groups": np.asarray(gate_hard_neg_groups, dtype=object),
@@ -1231,6 +1225,7 @@ def load_custom_task_datasets(dataset_root: Path, subject_filter: str | None = N
         },
         "artifact": {
             "X_artifact": np.asarray(X_artifact, dtype=np.float32),
+            "records": artifact_payloads,
             "artifact_labels": np.asarray(artifact_segment_labels, dtype=object),
             "artifact_groups": np.asarray(artifact_groups, dtype=object),
             "artifact_session_labels": np.asarray(artifact_sessions, dtype=object),
@@ -1502,11 +1497,15 @@ def compute_selection_objective_score(
     continuous_summary: dict[str, object],
 ) -> dict[str, object]:
     """Compute a deployment-oriented objective score from offline + continuous metrics."""
-    bank_kappa = _clip_unit_interval(float(metrics.get("bank_kappa", 0.0)))
-    bank_macro_f1 = _clip_unit_interval(float(metrics.get("bank_macro_f1", 0.0)))
+    selection_val_kappa = _clip_unit_interval(
+        float(metrics.get("selection_val_kappa", metrics.get("bank_kappa", 0.0)))
+    )
+    selection_val_macro_f1 = _clip_unit_interval(
+        float(metrics.get("selection_val_macro_f1", metrics.get("bank_macro_f1", 0.0)))
+    )
     components = {
-        "bank_kappa": bank_kappa,
-        "bank_macro_f1": bank_macro_f1,
+        "selection_val_kappa": selection_val_kappa,
+        "selection_val_macro_f1": selection_val_macro_f1,
     }
 
     continuous_available = bool(continuous_summary.get("available", False))
@@ -1518,15 +1517,15 @@ def compute_selection_objective_score(
         components["continuous_mi_prompt_accuracy"] = mi_prompt_accuracy
         components["continuous_no_control_specificity"] = no_control_specificity
         weights = {
-            "bank_kappa": 0.35,
-            "bank_macro_f1": 0.25,
+            "selection_val_kappa": 0.35,
+            "selection_val_macro_f1": 0.25,
             "continuous_mi_prompt_accuracy": 0.25,
             "continuous_no_control_specificity": 0.15,
         }
     else:
         weights = {
-            "bank_kappa": 0.60,
-            "bank_macro_f1": 0.40,
+            "selection_val_kappa": 0.60,
+            "selection_val_macro_f1": 0.40,
         }
 
     weight_sum = float(sum(float(weight) for weight in weights.values()))
@@ -1724,6 +1723,302 @@ def crop_trials_multi_offset(
     if not windows:
         return np.empty((0, X.shape[1], 0), dtype=np.float32)
     return np.concatenate(windows, axis=0).astype(np.float32)
+
+
+def required_window_samples(window_sec: float, sampling_rate: float, *, offset_sec: float = 0.0) -> int:
+    """Return the sample count required for one cropped window."""
+    total_sec = float(window_sec) + float(offset_sec)
+    return int(round(total_sec * float(sampling_rate)))
+
+
+def _crop_aux_segments(
+    array: np.ndarray,
+    *,
+    required_samples: int,
+    channel_count: int,
+) -> np.ndarray:
+    """Keep auxiliary segments only when they satisfy the required runtime window length."""
+    array = np.asarray(array, dtype=np.float32)
+    if array.ndim != 3 or array.shape[0] == 0:
+        return np.empty((0, channel_count, required_samples), dtype=np.float32)
+    if array.shape[1] != int(channel_count):
+        raise ValueError(
+            "Auxiliary dataset channel mismatch: "
+            f"expected {channel_count}, got {array.shape[1]}."
+        )
+    if required_samples <= 0 or array.shape[2] < int(required_samples):
+        return np.empty((0, channel_count, int(required_samples)), dtype=np.float32)
+    return np.asarray(array[:, :, : int(required_samples)], dtype=np.float32)
+
+
+def build_gate_branch_dataset(
+    gate_records: list[dict[str, object]],
+    *,
+    required_samples: int,
+    channel_count: int,
+) -> dict[str, object]:
+    """Materialize gate datasets from raw per-run records without global shortest-length truncation."""
+    pos_parts: list[np.ndarray] = []
+    neg_parts: list[np.ndarray] = []
+    hard_neg_parts: list[np.ndarray] = []
+    pos_groups: list[str] = []
+    neg_groups: list[str] = []
+    hard_neg_groups: list[str] = []
+    pos_sessions: list[str] = []
+    neg_sessions: list[str] = []
+    hard_neg_sessions: list[str] = []
+    neg_sources_out: list[str] = []
+    hard_neg_sources_out: list[str] = []
+    pos_max_samples = 0
+    neg_max_samples = 0
+    hard_neg_max_samples = 0
+    raw_present = False
+
+    for record in gate_records:
+        group = str(record.get("group", ""))
+        session = str(record.get("session", group))
+
+        pos_array = np.asarray(record.get("X_pos", np.empty((0, channel_count, 0), dtype=np.float32)), dtype=np.float32)
+        neg_array = np.asarray(record.get("X_neg", np.empty((0, channel_count, 0), dtype=np.float32)), dtype=np.float32)
+        hard_neg_array = np.asarray(
+            record.get("X_hard_neg", np.empty((0, channel_count, 0), dtype=np.float32)),
+            dtype=np.float32,
+        )
+        neg_sources = np.asarray(record.get("neg_sources", []), dtype=object)
+        hard_neg_sources = np.asarray(record.get("hard_neg_sources", []), dtype=object)
+
+        if pos_array.ndim == 3 and pos_array.shape[0] > 0:
+            raw_present = True
+            pos_max_samples = max(pos_max_samples, int(pos_array.shape[2]))
+            cropped = _crop_aux_segments(pos_array, required_samples=required_samples, channel_count=channel_count)
+            if cropped.shape[0] > 0:
+                pos_parts.append(cropped)
+                pos_groups.extend([group] * cropped.shape[0])
+                pos_sessions.extend([session] * cropped.shape[0])
+
+        if neg_array.ndim == 3 and neg_array.shape[0] > 0:
+            raw_present = True
+            neg_max_samples = max(neg_max_samples, int(neg_array.shape[2]))
+            cropped = _crop_aux_segments(neg_array, required_samples=required_samples, channel_count=channel_count)
+            if cropped.shape[0] > 0:
+                neg_parts.append(cropped)
+                neg_groups.extend([group] * cropped.shape[0])
+                neg_sessions.extend([session] * cropped.shape[0])
+                if neg_sources.shape[0] == neg_array.shape[0]:
+                    neg_sources_out.extend([_decode_npz_text(item) for item in neg_sources[: cropped.shape[0]].tolist()])
+                else:
+                    neg_sources_out.extend(["rest"] * cropped.shape[0])
+
+        if hard_neg_array.ndim == 3 and hard_neg_array.shape[0] > 0:
+            raw_present = True
+            hard_neg_max_samples = max(hard_neg_max_samples, int(hard_neg_array.shape[2]))
+            cropped = _crop_aux_segments(hard_neg_array, required_samples=required_samples, channel_count=channel_count)
+            if cropped.shape[0] > 0:
+                hard_neg_parts.append(cropped)
+                hard_neg_groups.extend([group] * cropped.shape[0])
+                hard_neg_sessions.extend([session] * cropped.shape[0])
+                if hard_neg_sources.shape[0] == hard_neg_array.shape[0]:
+                    hard_neg_sources_out.extend(
+                        [_decode_npz_text(item) for item in hard_neg_sources[: cropped.shape[0]].tolist()]
+                    )
+                else:
+                    hard_neg_sources_out.extend(["hard_negative"] * cropped.shape[0])
+
+    X_pos = np.concatenate(pos_parts, axis=0).astype(np.float32) if pos_parts else np.empty((0, channel_count, required_samples), dtype=np.float32)
+    X_neg = np.concatenate(neg_parts, axis=0).astype(np.float32) if neg_parts else np.empty((0, channel_count, required_samples), dtype=np.float32)
+    X_hard_neg = (
+        np.concatenate(hard_neg_parts, axis=0).astype(np.float32)
+        if hard_neg_parts
+        else np.empty((0, channel_count, required_samples), dtype=np.float32)
+    )
+    return {
+        "X_pos": X_pos,
+        "X_neg": X_neg,
+        "X_hard_neg": X_hard_neg,
+        "pos_groups": np.asarray(pos_groups, dtype=object),
+        "neg_groups": np.asarray(neg_groups, dtype=object),
+        "hard_neg_groups": np.asarray(hard_neg_groups, dtype=object),
+        "pos_session_labels": np.asarray(pos_sessions, dtype=object),
+        "neg_session_labels": np.asarray(neg_sessions, dtype=object),
+        "hard_neg_session_labels": np.asarray(hard_neg_sessions, dtype=object),
+        "neg_sources": np.asarray(neg_sources_out, dtype=object),
+        "hard_neg_sources": np.asarray(hard_neg_sources_out, dtype=object),
+        "raw_present": bool(raw_present),
+        "pos_max_samples": int(pos_max_samples),
+        "neg_max_samples": int(neg_max_samples),
+        "hard_neg_max_samples": int(hard_neg_max_samples),
+        "required_samples": int(required_samples),
+    }
+
+
+def build_artifact_branch_dataset(
+    artifact_records: list[dict[str, object]],
+    gate_records: list[dict[str, object]],
+    *,
+    required_samples: int,
+    channel_count: int,
+) -> dict[str, object]:
+    """Materialize artifact datasets from raw per-run records without borrowing the shortest gate run."""
+    artifact_parts: list[np.ndarray] = []
+    artifact_groups: list[str] = []
+    artifact_sessions: list[str] = []
+    artifact_labels: list[str] = []
+    clean_negative_parts: list[np.ndarray] = []
+    clean_negative_groups: list[str] = []
+    clean_negative_sessions: list[str] = []
+    artifact_max_samples = 0
+    clean_negative_max_samples = 0
+    raw_present = False
+
+    for record in artifact_records:
+        group = str(record.get("group", ""))
+        session = str(record.get("session", group))
+        artifact_array = np.asarray(
+            record.get("X_artifact", np.empty((0, channel_count, 0), dtype=np.float32)),
+            dtype=np.float32,
+        )
+        labels = np.asarray(record.get("artifact_labels", []), dtype=object)
+        if artifact_array.ndim != 3 or artifact_array.shape[0] == 0:
+            continue
+        raw_present = True
+        artifact_max_samples = max(artifact_max_samples, int(artifact_array.shape[2]))
+        cropped = _crop_aux_segments(artifact_array, required_samples=required_samples, channel_count=channel_count)
+        if cropped.shape[0] == 0:
+            continue
+        artifact_parts.append(cropped)
+        artifact_groups.extend([group] * cropped.shape[0])
+        artifact_sessions.extend([session] * cropped.shape[0])
+        if labels.shape[0] == artifact_array.shape[0]:
+            artifact_labels.extend([_decode_npz_text(item) for item in labels[: cropped.shape[0]].tolist()])
+        else:
+            artifact_labels.extend(["artifact"] * cropped.shape[0])
+
+    for record in gate_records:
+        group = str(record.get("group", ""))
+        session = str(record.get("session", group))
+
+        pos_array = np.asarray(record.get("X_pos", np.empty((0, channel_count, 0), dtype=np.float32)), dtype=np.float32)
+        neg_array = np.asarray(record.get("X_neg", np.empty((0, channel_count, 0), dtype=np.float32)), dtype=np.float32)
+        hard_neg_array = np.asarray(
+            record.get("X_hard_neg", np.empty((0, channel_count, 0), dtype=np.float32)),
+            dtype=np.float32,
+        )
+        hard_neg_sources = np.asarray(record.get("hard_neg_sources", []), dtype=object)
+
+        for candidate in (pos_array, neg_array):
+            if candidate.ndim != 3 or candidate.shape[0] == 0:
+                continue
+            raw_present = True
+            clean_negative_max_samples = max(clean_negative_max_samples, int(candidate.shape[2]))
+            cropped = _crop_aux_segments(candidate, required_samples=required_samples, channel_count=channel_count)
+            if cropped.shape[0] == 0:
+                continue
+            clean_negative_parts.append(cropped)
+            clean_negative_groups.extend([group] * cropped.shape[0])
+            clean_negative_sessions.extend([session] * cropped.shape[0])
+
+        if not artifact_parts and hard_neg_array.ndim == 3 and hard_neg_array.shape[0] > 0:
+            raw_present = True
+            artifact_max_samples = max(artifact_max_samples, int(hard_neg_array.shape[2]))
+            cropped_hard = _crop_aux_segments(
+                hard_neg_array,
+                required_samples=required_samples,
+                channel_count=channel_count,
+            )
+            if cropped_hard.shape[0] > 0:
+                artifact_parts.append(cropped_hard)
+                artifact_groups.extend([group] * cropped_hard.shape[0])
+                artifact_sessions.extend([session] * cropped_hard.shape[0])
+                if hard_neg_sources.shape[0] == hard_neg_array.shape[0]:
+                    artifact_labels.extend([_decode_npz_text(item) for item in hard_neg_sources[: cropped_hard.shape[0]].tolist()])
+                else:
+                    artifact_labels.extend(["hard_negative"] * cropped_hard.shape[0])
+
+    X_artifact = (
+        np.concatenate(artifact_parts, axis=0).astype(np.float32)
+        if artifact_parts
+        else np.empty((0, channel_count, required_samples), dtype=np.float32)
+    )
+    X_clean_negative = (
+        np.concatenate(clean_negative_parts, axis=0).astype(np.float32)
+        if clean_negative_parts
+        else np.empty((0, channel_count, required_samples), dtype=np.float32)
+    )
+    return {
+        "X_artifact": X_artifact,
+        "artifact_labels": np.asarray(artifact_labels, dtype=object),
+        "artifact_groups": np.asarray(artifact_groups, dtype=object),
+        "artifact_session_labels": np.asarray(artifact_sessions, dtype=object),
+        "X_clean_negative": X_clean_negative,
+        "clean_negative_groups": np.asarray(clean_negative_groups, dtype=object),
+        "clean_negative_session_labels": np.asarray(clean_negative_sessions, dtype=object),
+        "raw_present": bool(raw_present),
+        "artifact_max_samples": int(artifact_max_samples),
+        "clean_negative_max_samples": int(clean_negative_max_samples),
+        "required_samples": int(required_samples),
+    }
+
+
+def split_continuous_records_by_group_sets(
+    records: list[dict[str, object]],
+    *,
+    train_groups: set[str],
+    val_groups: set[str],
+    test_groups: set[str],
+    train_sessions: set[str] | None = None,
+    val_sessions: set[str] | None = None,
+    test_sessions: set[str] | None = None,
+) -> dict[str, object]:
+    """Assign continuous records to train/val/test buckets using run-group, then session fallback."""
+    buckets = {
+        "train": [],
+        "val": [],
+        "test": [],
+        "unassigned": [],
+    }
+    assignments: list[dict[str, str]] = []
+    train_sessions = set(str(item) for item in (train_sessions or set()))
+    val_sessions = set(str(item) for item in (val_sessions or set()))
+    test_sessions = set(str(item) for item in (test_sessions or set()))
+
+    for raw_record in records:
+        record = dict(raw_record)
+        group = str(record.get("run_stem", "")).strip()
+        session = str(record.get("session_id", "")).strip()
+        bucket = "unassigned"
+        matched_by = "none"
+        if group and group in train_groups:
+            bucket = "train"
+            matched_by = "group"
+        elif group and group in val_groups:
+            bucket = "val"
+            matched_by = "group"
+        elif group and group in test_groups:
+            bucket = "test"
+            matched_by = "group"
+        elif session and session in train_sessions:
+            bucket = "train"
+            matched_by = "session"
+        elif session and session in val_sessions:
+            bucket = "val"
+            matched_by = "session"
+        elif session and session in test_sessions:
+            bucket = "test"
+            matched_by = "session"
+        buckets[bucket].append(record)
+        assignments.append(
+            {
+                "run_stem": group,
+                "session_id": session,
+                "split": bucket,
+                "matched_by": matched_by,
+            }
+        )
+
+    buckets["all"] = [dict(item) for item in records]
+    buckets["trainval"] = [dict(item) for item in buckets["train"]] + [dict(item) for item in buckets["val"]]
+    buckets["assignments"] = assignments
+    return buckets
 
 
 def stack_multi_offset_split(
@@ -2448,12 +2743,15 @@ def _split_train_val_with_groups(
 
     if trainval_idx.shape[0] < int(class_count) * 2:
         return None
-    fallback_train, fallback_val = train_test_split(
-        trainval_idx,
-        test_size=0.25,
-        random_state=int(random_state),
-        stratify=y[trainval_idx],
-    )
+    try:
+        fallback_train, fallback_val = train_test_split(
+            trainval_idx,
+            test_size=0.25,
+            random_state=int(random_state),
+            stratify=y[trainval_idx],
+        )
+    except ValueError:
+        return None
     if split_contains_all_classes(y[fallback_train], class_count) and split_contains_all_classes(y[fallback_val], class_count):
         return fallback_train, fallback_val
     return None
@@ -2849,53 +3147,40 @@ def train_custom_model(
     test_group_set = set(str(item) for item in groups[test_idx].tolist())
     trainval_group_set = set(str(item) for item in groups[split_indices["trainval"]].tolist())
 
-    X_gate_pos_all = np.asarray(gate_loaded.get("X_pos", np.empty((0, X_raw.shape[1], 0), dtype=np.float32)), dtype=np.float32)
-    X_gate_neg_all = np.asarray(gate_loaded.get("X_neg", np.empty((0, X_raw.shape[1], 0), dtype=np.float32)), dtype=np.float32)
-    X_gate_hard_neg_all = np.asarray(
-        gate_loaded.get("X_hard_neg", np.empty((0, X_raw.shape[1], 0), dtype=np.float32)),
+    gate_required_samples = required_window_samples(
+        max(selected_window_secs),
+        sampling_rate,
+        offset_sec=max(selected_offset_secs),
+    )
+    gate_branch_loaded = build_gate_branch_dataset(
+        list(gate_loaded.get("records", [])),
+        required_samples=gate_required_samples,
+        channel_count=X_raw.shape[1],
+    )
+    X_gate_pos_all = np.asarray(
+        gate_branch_loaded.get("X_pos", np.empty((0, X_raw.shape[1], gate_required_samples), dtype=np.float32)),
         dtype=np.float32,
     )
-    gate_pos_groups_all = np.asarray(gate_loaded.get("pos_groups", []), dtype=object)
-    gate_neg_groups_all = np.asarray(gate_loaded.get("neg_groups", []), dtype=object)
-    gate_hard_neg_groups_all = np.asarray(gate_loaded.get("hard_neg_groups", []), dtype=object)
-    gate_pos_sessions_all = np.asarray(gate_loaded.get("pos_session_labels", []), dtype=object)
-    gate_neg_sessions_all = np.asarray(gate_loaded.get("neg_session_labels", []), dtype=object)
-    gate_hard_neg_sessions_all = np.asarray(gate_loaded.get("hard_neg_session_labels", []), dtype=object)
-    gate_neg_sources_all = np.asarray(gate_loaded.get("neg_sources", []), dtype=object)
-    gate_hard_neg_sources_all = np.asarray(gate_loaded.get("hard_neg_sources", []), dtype=object)
-
-    gate_nonempty_arrays = [
-        np.asarray(array, dtype=np.float32)
-        for array in (X_gate_pos_all, X_gate_neg_all, X_gate_hard_neg_all)
-        if np.asarray(array).ndim == 3 and np.asarray(array).shape[0] > 0 and np.asarray(array).shape[2] > 0
-    ]
-    if gate_nonempty_arrays:
-        gate_target_samples = int(min(array.shape[2] for array in gate_nonempty_arrays))
-    else:
-        gate_target_samples = int(gate_loaded.get("target_epoch_samples", 0) or 0)
-
-    def _normalize_gate_array(array: np.ndarray) -> np.ndarray:
-        array = np.asarray(array, dtype=np.float32)
-        if array.ndim != 3:
-            return np.empty((0, X_raw.shape[1], gate_target_samples), dtype=np.float32)
-        if array.shape[1] != X_raw.shape[1]:
-            raise ValueError(
-                "Gate dataset channel mismatch: "
-                f"expected {X_raw.shape[1]}, got {array.shape[1]}."
-            )
-        if gate_target_samples <= 0 or array.shape[0] == 0:
-            return np.empty((0, X_raw.shape[1], gate_target_samples), dtype=np.float32)
-        return np.asarray(array[:, :, :gate_target_samples], dtype=np.float32)
-
-    X_gate_pos_all = _normalize_gate_array(X_gate_pos_all)
-    X_gate_neg_all = _normalize_gate_array(X_gate_neg_all)
-    X_gate_hard_neg_all = _normalize_gate_array(X_gate_hard_neg_all)
+    X_gate_neg_all = np.asarray(
+        gate_branch_loaded.get("X_neg", np.empty((0, X_raw.shape[1], gate_required_samples), dtype=np.float32)),
+        dtype=np.float32,
+    )
+    X_gate_hard_neg_all = np.asarray(
+        gate_branch_loaded.get("X_hard_neg", np.empty((0, X_raw.shape[1], gate_required_samples), dtype=np.float32)),
+        dtype=np.float32,
+    )
+    gate_pos_groups_all = np.asarray(gate_branch_loaded.get("pos_groups", []), dtype=object)
+    gate_neg_groups_all = np.asarray(gate_branch_loaded.get("neg_groups", []), dtype=object)
+    gate_hard_neg_groups_all = np.asarray(gate_branch_loaded.get("hard_neg_groups", []), dtype=object)
+    gate_pos_sessions_all = np.asarray(gate_branch_loaded.get("pos_session_labels", []), dtype=object)
+    gate_neg_sessions_all = np.asarray(gate_branch_loaded.get("neg_session_labels", []), dtype=object)
+    gate_hard_neg_sessions_all = np.asarray(gate_branch_loaded.get("hard_neg_session_labels", []), dtype=object)
+    gate_neg_sources_all = np.asarray(gate_branch_loaded.get("neg_sources", []), dtype=object)
+    gate_hard_neg_sources_all = np.asarray(gate_branch_loaded.get("hard_neg_sources", []), dtype=object)
+    gate_target_samples = int(gate_branch_loaded.get("required_samples", gate_required_samples))
 
     gate_available = bool(
         gate_target_samples > 0
-        and X_gate_pos_all.shape[2] == gate_target_samples
-        and X_gate_neg_all.shape[2] == gate_target_samples
-        and X_gate_hard_neg_all.shape[2] == gate_target_samples
         and X_gate_pos_all.shape[0] > 0
         and (X_gate_neg_all.shape[0] + X_gate_hard_neg_all.shape[0]) > 0
     )
@@ -2912,6 +3197,16 @@ def train_custom_model(
         "test": np.asarray([], dtype=np.int64),
         "trainval": np.asarray([], dtype=np.int64),
     }
+    if not gate_available and bool(gate_branch_loaded.get("raw_present", False)):
+        gate_split_strategy = "insufficient_epoch_length"
+        gate_split_block_reason = (
+            "Gate records were found, but too few segments survived the runtime-window requirement after per-run "
+            "filtering. "
+            f"required={(gate_required_samples / float(sampling_rate)):.3f}s, "
+            f"max_control={(int(gate_branch_loaded.get('pos_max_samples', 0)) / float(sampling_rate)):.3f}s, "
+            f"max_clean={(int(gate_branch_loaded.get('neg_max_samples', 0)) / float(sampling_rate)):.3f}s, "
+            f"max_hard={(int(gate_branch_loaded.get('hard_neg_max_samples', 0)) / float(sampling_rate)):.3f}s."
+        )
     if gate_available:
         gate_X_all = np.concatenate([X_gate_pos_all, X_gate_neg_all, X_gate_hard_neg_all], axis=0).astype(np.float32)
         gate_y_all = np.concatenate(
@@ -2990,14 +3285,36 @@ def train_custom_model(
                     "trainval": np.asarray([], dtype=np.int64),
                 }
 
-    X_artifact_all = np.asarray(artifact_loaded.get("X_artifact", np.empty((0, X_raw.shape[1], 0), dtype=np.float32)), dtype=np.float32)
-    X_clean_negative_all = np.asarray(artifact_loaded.get("X_clean_negative", np.empty((0, X_raw.shape[1], 0), dtype=np.float32)), dtype=np.float32)
-    artifact_groups_pos = np.asarray(artifact_loaded.get("artifact_groups", []), dtype=object)
-    artifact_groups_neg = np.asarray(artifact_loaded.get("clean_negative_groups", []), dtype=object)
-    artifact_sessions_pos = np.asarray(artifact_loaded.get("artifact_session_labels", []), dtype=object)
-    artifact_sessions_neg = np.asarray(artifact_loaded.get("clean_negative_session_labels", []), dtype=object)
-
-    artifact_rejector_available = bool(X_artifact_all.shape[0] > 0 and X_clean_negative_all.shape[0] > 0)
+    artifact_required_samples = required_window_samples(max(selected_window_secs), sampling_rate, offset_sec=0.0)
+    artifact_branch_loaded = build_artifact_branch_dataset(
+        list(artifact_loaded.get("records", [])),
+        list(gate_loaded.get("records", [])),
+        required_samples=artifact_required_samples,
+        channel_count=X_raw.shape[1],
+    )
+    X_artifact_all = np.asarray(
+        artifact_branch_loaded.get(
+            "X_artifact",
+            np.empty((0, X_raw.shape[1], artifact_required_samples), dtype=np.float32),
+        ),
+        dtype=np.float32,
+    )
+    X_clean_negative_all = np.asarray(
+        artifact_branch_loaded.get(
+            "X_clean_negative",
+            np.empty((0, X_raw.shape[1], artifact_required_samples), dtype=np.float32),
+        ),
+        dtype=np.float32,
+    )
+    artifact_groups_pos = np.asarray(artifact_branch_loaded.get("artifact_groups", []), dtype=object)
+    artifact_groups_neg = np.asarray(artifact_branch_loaded.get("clean_negative_groups", []), dtype=object)
+    artifact_sessions_pos = np.asarray(artifact_branch_loaded.get("artifact_session_labels", []), dtype=object)
+    artifact_sessions_neg = np.asarray(artifact_branch_loaded.get("clean_negative_session_labels", []), dtype=object)
+    artifact_target_samples = int(artifact_branch_loaded.get("required_samples", artifact_required_samples))
+    artifact_rejector_available = bool(
+        X_artifact_all.shape[0] > 0
+        and X_clean_negative_all.shape[0] > 0
+    )
     artifact_split_strategy = "unavailable"
     artifact_split_block_reason: str | None = None
     artifact_binary_X_all = np.empty((0, X_raw.shape[1], 0), dtype=np.float32)
@@ -3010,6 +3327,15 @@ def train_custom_model(
         "test": np.asarray([], dtype=np.int64),
         "trainval": np.asarray([], dtype=np.int64),
     }
+    if not artifact_rejector_available and bool(artifact_branch_loaded.get("raw_present", False)):
+        artifact_split_strategy = "insufficient_epoch_length"
+        artifact_split_block_reason = (
+            "Artifact records were found, but too few clean/artifact segments survived the runtime-window requirement "
+            "after per-run filtering. "
+            f"required={(artifact_required_samples / float(sampling_rate)):.3f}s, "
+            f"max_artifact={(int(artifact_branch_loaded.get('artifact_max_samples', 0)) / float(sampling_rate)):.3f}s, "
+            f"max_clean={(int(artifact_branch_loaded.get('clean_negative_max_samples', 0)) / float(sampling_rate)):.3f}s."
+        )
     if artifact_rejector_available:
         artifact_binary_X_all = np.concatenate([X_artifact_all, X_clean_negative_all], axis=0).astype(np.float32)
         artifact_binary_y_all = np.concatenate(
@@ -3082,8 +3408,24 @@ def train_custom_model(
         split_indices=artifact_split_indices,
     )
 
+    train_session_set = set(str(item) for item in mi_split_assignments["train"]["sessions"])
+    val_session_set = set(str(item) for item in mi_split_assignments["val"]["sessions"])
+    test_session_set = set(str(item) for item in mi_split_assignments["test"]["sessions"])
+    continuous_records_by_split = split_continuous_records_by_group_sets(
+        list(continuous_loaded.get("records", [])),
+        train_groups=train_group_set,
+        val_groups=val_group_set,
+        test_groups=test_group_set,
+        train_sessions=train_session_set,
+        val_sessions=val_session_set,
+        test_sessions=test_session_set,
+    )
+
     rest_segments_all = [np.asarray(item, dtype=np.float32) for item in X_gate_neg_all] if X_gate_neg_all.ndim == 3 else []
-    rest_source_phases_all = np.asarray(["gate_neg"] * len(rest_segments_all), dtype=object)
+    if gate_neg_sources_all.shape[0] == len(rest_segments_all):
+        rest_source_phases_all = np.asarray(gate_neg_sources_all, dtype=object)
+    else:
+        rest_source_phases_all = np.asarray(["gate_neg"] * len(rest_segments_all), dtype=object)
     if gate_neg_groups_all.size:
         rest_train_mask = np.asarray([str(item) in train_group_set for item in gate_neg_groups_all.tolist()], dtype=bool)
         rest_val_mask = np.asarray([str(item) in val_group_set for item in gate_neg_groups_all.tolist()], dtype=bool)
@@ -4576,12 +4918,32 @@ def train_custom_model(
             }
         )
 
-    continuous_variant_results: list[dict[str, object]] = []
-    for variant in continuous_variants:
-        use_gate = bool(variant["use_gate"])
-        use_artifact = bool(variant["use_artifact"])
-        variant_summary = evaluate_continuous_online_like(
-            continuous_records=list(continuous_loaded.get("records", [])),
+    continuous_selection_records = list(continuous_records_by_split.get("val", []))
+    continuous_selection_source = "val_split"
+    if not continuous_selection_records:
+        continuous_selection_records = list(continuous_records_by_split.get("test", []))
+        continuous_selection_source = "test_split_fallback"
+    if not continuous_selection_records:
+        continuous_selection_records = list(continuous_records_by_split.get("all", []))
+        continuous_selection_source = "all_records_fallback"
+
+    continuous_eval_records = list(continuous_records_by_split.get("test", []))
+    continuous_eval_source = "test_split"
+    if not continuous_eval_records:
+        continuous_eval_records = list(continuous_records_by_split.get("val", []))
+        continuous_eval_source = "val_split_fallback"
+    if not continuous_eval_records:
+        continuous_eval_records = list(continuous_records_by_split.get("all", []))
+        continuous_eval_source = "all_records_fallback"
+
+    def _evaluate_continuous_variant(
+        *,
+        records: list[dict[str, object]],
+        use_gate: bool,
+        use_artifact: bool,
+    ) -> dict[str, object]:
+        return evaluate_continuous_online_like(
+            continuous_records=records,
             main_member_artifacts=member_artifacts,
             main_fusion_weights=list(bank_artifact["fusion_weights"]),
             main_fusion_method=fusion_method,
@@ -4624,16 +4986,26 @@ def train_custom_model(
             ),
             artifact_runtime=artifact_runtime if use_artifact else None,
         )
+
+    continuous_variant_results: list[dict[str, object]] = []
+    for variant in continuous_variants:
+        use_gate = bool(variant["use_gate"])
+        use_artifact = bool(variant["use_artifact"])
+        selection_summary = _evaluate_continuous_variant(
+            records=continuous_selection_records,
+            use_gate=use_gate,
+            use_artifact=use_artifact,
+        )
         objective = compute_selection_objective_score(
             metrics=bank_artifact["metrics"],
-            continuous_summary=variant_summary,
+            continuous_summary=selection_summary,
         )
         continuous_variant_results.append(
             {
                 "name": str(variant["name"]),
                 "use_gate": use_gate,
                 "use_artifact": use_artifact,
-                "continuous": variant_summary,
+                "selection_continuous": selection_summary,
                 "selection_objective": objective,
             }
         )
@@ -4642,17 +5014,34 @@ def train_custom_model(
         continuous_variant_results,
         key=lambda item: (
             float(item["selection_objective"]["score"]),
-            float((item["continuous"] or {}).get("mi_prompt_accuracy", 0.0)),
-            -float((item["continuous"] or {}).get("no_control_false_activation_rate", 1.0)),
+            float((item["selection_continuous"] or {}).get("mi_prompt_accuracy", 0.0)),
+            -float((item["selection_continuous"] or {}).get("no_control_false_activation_rate", 1.0)),
             int(bool(item.get("use_gate"))) + int(bool(item.get("use_artifact"))),
         ),
     )
     selected_variant_name = str(best_variant["name"])
     selected_use_gate = bool(best_variant.get("use_gate", False))
     selected_use_artifact = bool(best_variant.get("use_artifact", False))
-    continuous_summary = dict(best_variant.get("continuous") or {})
+    evaluation_summary = _evaluate_continuous_variant(
+        records=continuous_eval_records,
+        use_gate=selected_use_gate,
+        use_artifact=selected_use_artifact,
+    )
+    continuous_summary = dict(evaluation_summary or best_variant.get("selection_continuous") or {})
     continuous_summary["selection_objective"] = dict(best_variant.get("selection_objective") or {})
     continuous_summary["selected_variant"] = selected_variant_name
+    continuous_summary["selection_source"] = continuous_selection_source
+    continuous_summary["evaluation_source"] = continuous_eval_source
+    continuous_summary["selection_record_count"] = int(len(continuous_selection_records))
+    continuous_summary["evaluation_record_count"] = int(len(continuous_eval_records))
+    continuous_summary["split_record_counts"] = {
+        "train": int(len(continuous_records_by_split.get("train", []))),
+        "val": int(len(continuous_records_by_split.get("val", []))),
+        "test": int(len(continuous_records_by_split.get("test", []))),
+        "unassigned": int(len(continuous_records_by_split.get("unassigned", []))),
+        "all": int(len(continuous_records_by_split.get("all", []))),
+    }
+    continuous_summary["selection_summary"] = dict(best_variant.get("selection_continuous") or {})
     continuous_summary["evaluated_variants"] = [
         {
             "name": str(item["name"]),
@@ -4660,10 +5049,14 @@ def train_custom_model(
             "use_artifact": bool(item["use_artifact"]),
             "selection_objective_score": float(item["selection_objective"]["score"]),
             "selection_objective_components": dict(item["selection_objective"]["components"]),
-            "continuous_available": bool(item["continuous"].get("available", False)),
-            "mi_prompt_accuracy": float(item["continuous"].get("mi_prompt_accuracy", 0.0)),
-            "no_control_false_activation_rate": float(item["continuous"].get("no_control_false_activation_rate", 0.0)),
-            "evaluated_prompt_count": int(item["continuous"].get("evaluated_prompt_count", 0)),
+            "selection_continuous_available": bool(item["selection_continuous"].get("available", False)),
+            "selection_mi_prompt_accuracy": float(item["selection_continuous"].get("mi_prompt_accuracy", 0.0)),
+            "selection_no_control_false_activation_rate": float(
+                item["selection_continuous"].get("no_control_false_activation_rate", 0.0)
+            ),
+            "selection_evaluated_prompt_count": int(
+                item["selection_continuous"].get("evaluated_prompt_count", 0)
+            ),
         }
         for item in continuous_variant_results
     ]
@@ -4775,6 +5168,12 @@ def train_custom_model(
         "selected_runtime_variant": selected_variant_name,
         "continuous_prompt_count": int(continuous_loaded.get("prompt_count", 0)),
         "continuous_record_count": int(continuous_loaded.get("record_count", 0)),
+        "continuous_split_records": {
+            "train": int(len(continuous_records_by_split.get("train", []))),
+            "val": int(len(continuous_records_by_split.get("val", []))),
+            "test": int(len(continuous_records_by_split.get("test", []))),
+            "unassigned": int(len(continuous_records_by_split.get("unassigned", []))),
+        },
         "gate_dataset": {
             "available": bool(gate_available),
             "split_strategy": gate_split_strategy,
@@ -4787,6 +5186,13 @@ def train_custom_model(
             "negative_count": int(X_gate_neg_all.shape[0] + X_gate_hard_neg_all.shape[0]),
             "negative_clean_count": int(X_gate_neg_all.shape[0]),
             "negative_hard_count": int(X_gate_hard_neg_all.shape[0]),
+            "required_window_sec": float(gate_required_samples / float(sampling_rate)),
+            "required_epoch_samples": int(gate_required_samples),
+            "max_control_window_sec": float(int(gate_branch_loaded.get("pos_max_samples", 0)) / float(sampling_rate)),
+            "max_clean_window_sec": float(int(gate_branch_loaded.get("neg_max_samples", 0)) / float(sampling_rate)),
+            "max_hard_window_sec": float(
+                int(gate_branch_loaded.get("hard_neg_max_samples", 0)) / float(sampling_rate)
+            ),
             "negative_source_counts": {
                 str(source): int(np.sum(np.asarray(gate_sources_all[gate_y_all == 0], dtype=object) == source))
                 for source in np.unique(np.asarray(gate_sources_all[gate_y_all == 0], dtype=object))
@@ -4802,6 +5208,14 @@ def train_custom_model(
             "test_count": int(artifact_split_indices["test"].shape[0]) if artifact_rejector_available else 0,
             "artifact_positive_count": int(X_artifact_all.shape[0]),
             "clean_negative_count": int(X_clean_negative_all.shape[0]),
+            "required_window_sec": float(artifact_required_samples / float(sampling_rate)),
+            "required_epoch_samples": int(artifact_required_samples),
+            "max_artifact_window_sec": float(
+                int(artifact_branch_loaded.get("artifact_max_samples", 0)) / float(sampling_rate)
+            ),
+            "max_clean_window_sec": float(
+                int(artifact_branch_loaded.get("clean_negative_max_samples", 0)) / float(sampling_rate)
+            ),
         },
         "source_sessions": loaded["session_paths"],
         "source_records": loaded["source_records"],

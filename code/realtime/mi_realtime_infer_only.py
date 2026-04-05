@@ -44,11 +44,12 @@ if str(SHARED_ROOT) not in sys.path:
     sys.path.insert(0, str(SHARED_ROOT))
 
 from src.realtime_mi import RealtimeMIPredictor, load_realtime_model  # noqa: E402
+from src.serial_ports import detect_serial_ports  # noqa: E402
 
 
 USER_CONFIG = {
     "realtime_mode": "continuous",
-    "serial_port": "COM3",
+    "serial_port": "",
     "board_id": BoardIds.CYTON_BOARD.value,
     "model_path": PROJECT_ROOT / "code" / "realtime" / "models" / "custom_mi_realtime.joblib",
     "window_model_paths": [],
@@ -141,29 +142,55 @@ def validate_runtime_config(config: dict, artifact: dict) -> None:
     """Validate runtime settings before starting realtime acquisition."""
     normalize_realtime_mode(config.get("realtime_mode", "continuous"))
     board_id = int(config["board_id"])
-    expected_channels = len(artifact["channel_names"])
-    positions = config.get("board_channel_positions")
-
     synthetic_board = getattr(BoardIds, "SYNTHETIC_BOARD", None)
     is_synthetic = synthetic_board is not None and board_id == int(synthetic_board.value)
     if not is_synthetic and not str(config.get("serial_port", "")).strip():
         raise ValueError("serial_port cannot be empty for non-synthetic boards.")
-    if not is_synthetic and positions is None:
+    resolve_board_channel_positions(
+        board_id=board_id,
+        expected_channels=len(artifact["channel_names"]),
+        positions=config.get("board_channel_positions"),
+        model_channel_names=artifact["channel_names"],
+    )
+
+
+def resolve_board_channel_positions(
+    *,
+    board_id: int,
+    expected_channels: int,
+    positions: object,
+    model_channel_names: list[str] | tuple[str, ...],
+) -> list[int]:
+    """Normalize or auto-resolve realtime board channel positions."""
+    available_eeg_rows = BoardShim.get_eeg_channels(int(board_id))
+    available_count = int(len(available_eeg_rows))
+    if expected_channels <= 0:
+        raise ValueError("Expected at least one realtime channel.")
+
+    if positions is None:
+        if available_count == int(expected_channels):
+            return list(range(int(expected_channels)))
         raise ValueError(
-            "board_channel_positions must be set explicitly for realtime decoding. "
-            f"Expected {expected_channels} indices aligned to model channels: {list(artifact['channel_names'])}."
+            "board_channel_positions must be set explicitly when the board EEG row count "
+            f"({available_count}) differs from the model channel count ({expected_channels}). "
+            f"Model channels: {list(model_channel_names)}."
         )
 
-    if positions is not None:
-        normalized = [int(index) for index in positions]
-        if len(normalized) != expected_channels:
-            raise ValueError(
-                f"board_channel_positions length mismatch: expected {expected_channels}, got {len(normalized)}."
-            )
-        if min(normalized) < 0:
-            raise ValueError("board_channel_positions cannot contain negative indices.")
-        if len(set(normalized)) != len(normalized):
-            raise ValueError("board_channel_positions contains duplicated indices.")
+    normalized = [int(index) for index in positions]
+    if len(normalized) != expected_channels:
+        raise ValueError(
+            f"board_channel_positions length mismatch: expected {expected_channels}, got {len(normalized)}."
+        )
+    if min(normalized) < 0:
+        raise ValueError("board_channel_positions cannot contain negative indices.")
+    if len(set(normalized)) != len(normalized):
+        raise ValueError("board_channel_positions contains duplicated indices.")
+    if max(normalized) >= available_count:
+        raise ValueError(
+            f"board_channel_positions is invalid: board has {available_count} EEG rows "
+            f"but the largest requested index is {max(normalized)}."
+        )
+    return normalized
 
 
 def resolve_default_model_path() -> Path:
@@ -196,19 +223,6 @@ def available_board_options() -> list[tuple[str, int]]:
             label = "Synthetic (Demo)"
         options.append((label, int(board.value)))
     return options
-
-
-def detect_serial_ports() -> list[str]:
-    """Detect available serial ports, falling back to common COM names."""
-    try:
-        from serial.tools import list_ports
-
-        devices = sorted({str(port.device).strip() for port in list_ports.comports() if str(port.device).strip()})
-        if devices:
-            return devices
-    except Exception:
-        pass
-    return [f"COM{i}" for i in range(1, 21)]
 
 
 def _scaled_px(base_px: float, scale: float, min_px: int, max_px: int | None = None) -> int:
@@ -257,18 +271,12 @@ class EEGWorker(QObject):
             sampling_rate = float(BoardShim.get_sampling_rate(int(self.config["board_id"])))
             eeg_rows = BoardShim.get_eeg_channels(int(self.config["board_id"]))
             expected_channels = self.predictor.expected_channel_count
-
-            if self.config.get("board_channel_positions") is None:
-                selected_positions = list(range(expected_channels))
-            else:
-                selected_positions = [int(index) for index in self.config["board_channel_positions"]]
-
-            if len(selected_positions) != expected_channels:
-                raise ValueError("board_channel_positions length must match the model channel count.")
-            if max(selected_positions) >= len(eeg_rows):
-                raise ValueError(
-                    f"Board only exposes {len(eeg_rows)} EEG rows, but selected positions are {selected_positions}."
-                )
+            selected_positions = resolve_board_channel_positions(
+                board_id=int(self.config["board_id"]),
+                expected_channels=expected_channels,
+                positions=self.config.get("board_channel_positions"),
+                model_channel_names=self.predictor.artifact["channel_names"],
+            )
 
             self.selected_rows = [eeg_rows[index] for index in selected_positions]
             startup_samples = 8
@@ -535,7 +543,6 @@ class MIRealtimeWindow(QMainWindow):
         self.serial_combo = QComboBox()
         self.serial_combo.setEditable(True)
         self.refresh_serial_ports()
-        self.serial_combo.setCurrentText(str(self.config.get("serial_port", "")))
 
         port_row = QHBoxLayout()
         self.btn_refresh_ports = QPushButton("Refresh Ports")
@@ -835,7 +842,8 @@ class MIRealtimeWindow(QMainWindow):
         scrollbar.setValue(scrollbar.maximum())
 
     def refresh_serial_ports(self) -> None:
-        selected = self.serial_combo.currentText().strip()
+        configured = str(self.config.get("serial_port", "")).strip()
+        selected = self.serial_combo.currentText().strip() or configured
         ports = detect_serial_ports()
 
         self.serial_combo.blockSignals(True)
@@ -849,7 +857,7 @@ class MIRealtimeWindow(QMainWindow):
         elif ports:
             self.serial_combo.setCurrentIndex(0)
         else:
-            self.serial_combo.setCurrentText("COM3")
+            self.serial_combo.setCurrentText("")
         self.serial_combo.blockSignals(False)
 
     def refresh_board_input_state(self) -> None:
@@ -860,7 +868,7 @@ class MIRealtimeWindow(QMainWindow):
         self.board_combo.setEnabled(not self.device_connected)
         line_edit = self.serial_combo.lineEdit()
         if line_edit is not None:
-            line_edit.setPlaceholderText("No serial port needed for synthetic board" if is_synthetic else "Example: COM3")
+            line_edit.setPlaceholderText("No serial port needed for synthetic board" if is_synthetic else "Example: COM4")
 
     def refresh_header(self) -> None:
         board_text = self.board_combo.currentText() if hasattr(self, "board_combo") else str(self.config.get("board_id"))
@@ -885,36 +893,24 @@ class MIRealtimeWindow(QMainWindow):
         selected_config["serial_port"] = self.serial_combo.currentText().strip()
 
         try:
+            normalized_positions = resolve_board_channel_positions(
+                board_id=int(selected_config["board_id"]),
+                expected_channels=self.predictor.expected_channel_count,
+                positions=selected_config.get("board_channel_positions"),
+                model_channel_names=self.predictor.artifact["channel_names"],
+            )
             validate_runtime_config(selected_config, self.predictor.artifact)
         except Exception as error:
             self.show_error(f"Invalid connection settings: {error}")
             return
 
-        available_eeg_rows = BoardShim.get_eeg_channels(int(selected_config["board_id"]))
-        expected_channels = self.predictor.expected_channel_count
-        positions = selected_config.get("board_channel_positions")
-        synthetic_board = getattr(BoardIds, "SYNTHETIC_BOARD", None)
-        is_synthetic = synthetic_board is not None and int(selected_config["board_id"]) == int(synthetic_board.value)
-        if positions is None:
-            if not is_synthetic:
-                self.show_error(
-                    "board_channel_positions is required for non-synthetic boards. "
-                    f"Set {expected_channels} explicit indices in USER_CONFIG so channel order matches training."
-                )
-                return
-            if len(available_eeg_rows) < expected_channels:
-                self.show_error(
-                    f"Board exposes {len(available_eeg_rows)} EEG rows but the model expects {expected_channels}."
-                )
-                return
-        else:
-            max_position = max(int(index) for index in positions)
-            if max_position >= len(available_eeg_rows):
-                self.show_error(
-                    f"board_channel_positions is invalid: board has {len(available_eeg_rows)} EEG rows "
-                    f"but the largest requested index is {max_position}."
-                )
-                return
+        if selected_config.get("board_channel_positions") is None:
+            selected_config["board_channel_positions"] = list(normalized_positions)
+            self.log(
+                "Auto-resolved board_channel_positions to "
+                f"{selected_config['board_channel_positions']} because the board EEG row count "
+                "matches the model channel count."
+            )
 
         params = BrainFlowInputParams()
         params.serial_port = str(selected_config["serial_port"])
@@ -1452,10 +1448,22 @@ class MIRealtimeWindow(QMainWindow):
             self.show_error(f"Connect the device before starting {self.runtime_session_name()}.")
             return
         try:
+            normalized_positions = resolve_board_channel_positions(
+                board_id=int(self.config["board_id"]),
+                expected_channels=self.predictor.expected_channel_count,
+                positions=self.config.get("board_channel_positions"),
+                model_channel_names=self.predictor.artifact["channel_names"],
+            )
             validate_runtime_config(self.config, self.predictor.artifact)
         except Exception as error:
             self.show_error(f"Invalid runtime configuration: {error}")
             return
+        if self.config.get("board_channel_positions") is None:
+            self.config["board_channel_positions"] = list(normalized_positions)
+            self.log(
+                "Auto-resolved board_channel_positions to "
+                f"{self.config['board_channel_positions']} before starting realtime decoding."
+            )
 
         self._stopping = False
         self.eeg_thread = QThread(self)

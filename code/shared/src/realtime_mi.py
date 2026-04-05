@@ -13,14 +13,7 @@ from sklearn.metrics import accuracy_score, cohen_kappa_score
 from sklearn.model_selection import train_test_split
 
 from src.models import apply_probability_calibration, fit_probability_calibration, predict_probability_matrix
-from src.train import (
-    build_optimized_model_candidates,
-    ensure_dataset_available,
-    load_config,
-    load_subject_data,
-    preprocess_trials,
-    seed_everything,
-)
+from src.preprocessing import preprocess
 
 
 BCI_IV_2A_CHANNEL_NAMES = [
@@ -75,6 +68,14 @@ REQUIRED_PREPROCESSING_KEYS = (
     "window_offset_sec",
 )
 
+LEGACY_PREPROCESSING_DEFAULTS = {
+    "bandpass": [4.0, 40.0],
+    "optimized_input_bandpass": [4.0, 40.0],
+    "notch": 50.0,
+    "apply_car": True,
+    "standardize": False,
+}
+
 
 def _as_float_pair(value: object, *, field_name: str) -> list[float]:
     """Validate and normalize two-element numeric lists used by preprocessing config."""
@@ -95,9 +96,41 @@ def _preprocessing_fingerprint(preprocessing: dict[str, object]) -> str:
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
+def _upgrade_legacy_preprocessing_config(artifact: dict, preproc_cfg: object) -> dict[str, object] | None:
+    """Backfill legacy realtime artifacts that predate the current preprocessing schema."""
+    if not isinstance(preproc_cfg, dict):
+        return None
+
+    upgraded = dict(preproc_cfg)
+    window_sec = artifact.get("window_sec")
+    raw_offset_sec = artifact.get("window_offset_sec", 0.0)
+    raw_offset_secs_used = artifact.get("window_offset_secs_used")
+
+    if "bandpass" not in upgraded:
+        upgraded["bandpass"] = list(LEGACY_PREPROCESSING_DEFAULTS["bandpass"])
+    if "optimized_input_bandpass" not in upgraded:
+        upgraded["optimized_input_bandpass"] = list(LEGACY_PREPROCESSING_DEFAULTS["optimized_input_bandpass"])
+    if "notch" not in upgraded:
+        upgraded["notch"] = LEGACY_PREPROCESSING_DEFAULTS["notch"]
+    if "apply_car" not in upgraded:
+        upgraded["apply_car"] = LEGACY_PREPROCESSING_DEFAULTS["apply_car"]
+    if "standardize" not in upgraded:
+        upgraded["standardize"] = LEGACY_PREPROCESSING_DEFAULTS["standardize"]
+    if "epoch_window" not in upgraded and window_sec is not None:
+        upgraded["epoch_window"] = [0.0, float(window_sec)]
+    if "window_offset_sec" not in upgraded:
+        upgraded["window_offset_sec"] = float(raw_offset_sec)
+    if "window_offset_secs_used" not in upgraded:
+        if isinstance(raw_offset_secs_used, (list, tuple)) and raw_offset_secs_used:
+            upgraded["window_offset_secs_used"] = [float(item) for item in raw_offset_secs_used]
+        else:
+            upgraded["window_offset_secs_used"] = [float(upgraded.get("window_offset_sec", 0.0))]
+    return upgraded
+
+
 def _resolve_required_preprocessing_config(artifact: dict) -> dict[str, object]:
     """Return a validated preprocessing config; raise when mandatory fields are missing."""
-    preproc_cfg = artifact.get("preprocessing")
+    preproc_cfg = _upgrade_legacy_preprocessing_config(artifact, artifact.get("preprocessing"))
     if not isinstance(preproc_cfg, dict):
         raise ValueError("Realtime artifact is missing dict field 'preprocessing'.")
     missing = [field for field in REQUIRED_PREPROCESSING_KEYS if field not in preproc_cfg]
@@ -129,7 +162,29 @@ def _resolve_required_preprocessing_config(artifact: dict) -> dict[str, object]:
     }
     if normalized["notch"] is not None and normalized["notch"] <= 0.0:
         raise ValueError("Artifact preprocessing field 'notch' must be positive when provided.")
+    artifact["preprocessing"] = dict(normalized)
+    artifact["preprocessing_fingerprint"] = _preprocessing_fingerprint(normalized)
     return normalized
+
+
+def _preprocess_trials_for_runtime(
+    X: np.ndarray,
+    *,
+    sampling_rate: float,
+    optimized_input_bandpass: list[float] | tuple[float, float],
+    notch: float | None,
+    apply_car: bool,
+    standardize_data: bool,
+) -> np.ndarray:
+    """Run the optimized realtime preprocessing without importing training-only modules."""
+    return preprocess(
+        X,
+        fs=float(sampling_rate),
+        bandpass=optimized_input_bandpass,
+        notch=notch,
+        apply_car=apply_car,
+        standardize_data=standardize_data,
+    )
 
 
 def parse_channel_names(raw_value: str | list[str] | None) -> list[str]:
@@ -344,22 +399,13 @@ def _preprocess_single_window(raw_window: np.ndarray, artifact: dict, live_sampl
         effective_fs = model_sampling_rate
 
     preproc_cfg = _resolve_required_preprocessing_config(artifact)
-    processed = preprocess_trials(
+    processed = _preprocess_trials_for_runtime(
         working[np.newaxis, ...],
-        {
-            "dataset": {"sampling_rate": effective_fs},
-            "preprocessing": {
-                "bandpass": list(preproc_cfg["bandpass"]),
-                "notch": preproc_cfg["notch"],
-                "apply_car": bool(preproc_cfg["apply_car"]),
-                "standardize": bool(preproc_cfg["standardize"]),
-            },
-            "model": {
-                "type": artifact["model_type"],
-                "optimized_input_bandpass": list(preproc_cfg["optimized_input_bandpass"]),
-            },
-        },
-        model_type=artifact["model_type"],
+        sampling_rate=float(effective_fs),
+        optimized_input_bandpass=list(preproc_cfg["optimized_input_bandpass"]),
+        notch=preproc_cfg["notch"],
+        apply_car=bool(preproc_cfg["apply_car"]),
+        standardize_data=bool(preproc_cfg["standardize"]),
     )
     return processed
 
@@ -372,6 +418,14 @@ def fit_realtime_model(
     output_path: str | Path | None = None,
 ) -> dict:
     """Train and optionally persist a realtime-compatible MI classifier."""
+    from src.train import (
+        build_optimized_model_candidates,
+        ensure_dataset_available,
+        load_config,
+        load_subject_data,
+        seed_everything,
+    )
+
     config_path = Path(config_path).resolve()
     project_root = config_path.parent
     config = load_config(config_path)
@@ -387,8 +441,26 @@ def fit_realtime_model(
     X_train = X_train[:, channel_indices, :]
     X_test = X_test[:, channel_indices, :]
 
-    X_train = preprocess_trials(X_train, config, model_type="optimized")
-    X_test = preprocess_trials(X_test, config, model_type="optimized")
+    optimized_input_bandpass = [
+        float(item) for item in list(config["model"].get("optimized_input_bandpass", [4.0, 40.0]))
+    ]
+    notch = config["preprocessing"].get("notch")
+    X_train = _preprocess_trials_for_runtime(
+        X_train,
+        sampling_rate=float(config["dataset"]["sampling_rate"]),
+        optimized_input_bandpass=optimized_input_bandpass,
+        notch=None if notch is None else float(notch),
+        apply_car=bool(config["preprocessing"].get("apply_car", True)),
+        standardize_data=bool(config["preprocessing"].get("standardize", False)),
+    )
+    X_test = _preprocess_trials_for_runtime(
+        X_test,
+        sampling_rate=float(config["dataset"]["sampling_rate"]),
+        optimized_input_bandpass=optimized_input_bandpass,
+        notch=None if notch is None else float(notch),
+        apply_car=bool(config["preprocessing"].get("apply_car", True)),
+        standardize_data=bool(config["preprocessing"].get("standardize", False)),
+    )
 
     X_tr, X_val, y_tr, y_val = train_test_split(
         X_train,
@@ -511,10 +583,6 @@ def load_realtime_model(
 
     artifact = joblib.load(Path(model_path))
     if str(artifact.get("artifact_type", "single_window")) == "multi_window_bank":
-        for member in _flatten_realtime_artifact_members(artifact):
-            _resolve_required_preprocessing_config(member)
-        if fusion_weights is None:
-            return artifact
         rebuilt = build_realtime_artifact_bank(
             [artifact],
             fusion_weights=artifact.get("fusion_weights") if fusion_weights is None else fusion_weights,

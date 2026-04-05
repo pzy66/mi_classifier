@@ -69,6 +69,7 @@ from src.mi_collection import (
     parse_channel_positions,
     save_mi_session,
 )
+from src.serial_ports import detect_serial_ports
 
 
 DEFAULT_CHANNEL_NAMES = ["C3", "Cz", "C4", "PO3", "PO4", "O1", "Oz", "O2"]
@@ -256,20 +257,6 @@ def available_board_options() -> list[tuple[str, int]]:
         label = label_map.get(name, name.replace("_BOARD", "").replace("_", " ").title())
         options.append((label, int(board.value)))
     return options
-
-
-def detect_serial_ports() -> list[str]:
-    """Detect available serial ports, falling back to common COM names."""
-    try:
-        from serial.tools import list_ports
-
-        devices = sorted({str(port.device).strip() for port in list_ports.comports() if str(port.device).strip()})
-        if devices:
-            return devices
-    except Exception:
-        pass
-
-    return [f"COM{i}" for i in range(1, 21)]
 
 
 class CueIllustrationWidget(QWidget):
